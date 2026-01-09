@@ -10,8 +10,8 @@ behavior:
 # ====================================================================
 temperature: 1.0  # Global temperature for all stages; controls randomness in model outputs (typically 0.0-2.0). Required to be 1.0 when using extended thinking.
 evaluator_reasoning_effort: "low"  # Fraction of tokens allocated to thinking for evaluator models. Options: "none", "low", "medium", "high". Higher = more deliberate reasoning.
-target_reasoning_effort: "medium"  # Fraction of tokens allocated to thinking for target models. Options: "none", "low", "medium", "high". Affects how the target model reasons through scenarios.
-max_concurrent: 15  # Maximum concurrent operations across all stages (parallel API calls). Higher = faster but more resource-intensive.
+target_reasoning_effort: "none"  # Fraction of tokens allocated to thinking for target models. Options: "none", "low", "medium", "high". Affects how the target model reasons through scenarios.
+max_concurrent: 64  # Maximum concurrent operations across all stages (parallel API calls). Higher = faster but more resource-intensive.
 configurable_prompts: "default"  # Configurable prompts file to use (loads from bloom-configurable_prompts/ directory).
 anonymous_target: false  # When true, the target model's identity is hidden from all agents (ideation, rollout, judgment). When false, agents are told "The model we are evaluating is [Model Name]". Useful for evaluating identity-oriented behaviors like self-preferential bias.
 debug: false  # Enable debug output to see detailed pipeline progress including API calls, stage transitions, and intermediate results.
@@ -58,7 +58,7 @@ rollout:
   # Evaluator model (red team). Can be either short name or direct LiteLLM ID.
   model: "claude-opus-4.1"
   # Target model to evaluate. Can be either short name or direct LiteLLM ID.
-  target: "claude-sonnet-4"
+  target: "olmo-3-7b-instruct-sft"
   modality: "conversation"  # Rollout modality. Options: "conversation" = language-only conversation (Q&A format), "simenv" = simulated environment (target can make function/tool calls)
   max_turns: 2  # Maximum conversation length in turns (1 turn = 1 user message + 1 assistant response). Set to 2 for 2-turn conversations.
   max_tokens: 4000  # Maximum tokens for rollout output per message (applies to both evaluator and target model messages)
