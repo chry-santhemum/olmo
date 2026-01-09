@@ -1,0 +1,12 @@
+[project]
+name = "olmo-debug"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bloom",
+]
+
+[tool.uv.sources]
+bloom = { path = "../bloom", editable = true }
