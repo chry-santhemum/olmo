@@ -5,9 +5,22 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "accelerate>=1.12.0",
     "anthropic>=0.75.0",
     "bloom",
+    "datasets>=4.4.2",
+    "ipykernel>=7.1.0",
+    "ipywidgets>=8.1.8",
+    "jaxtyping>=0.2.0",
+    "loguru>=0.7.3",
+    "matplotlib>=3.8.0",
+    "numpy>=1.26.0",
+    "pandas>=2.0.0",
     "petri",
+    "scipy>=1.12.0",
+    "torch>=2.0.0",
+    "tqdm>=4.66.0",
+    "transformers>=4.40.0",
 ]
 
 [tool.uv.sources]

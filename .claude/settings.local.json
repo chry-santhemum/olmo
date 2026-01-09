@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo:*)",
+      "Bash(source:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:inspect.aisi.org.uk)",
+      "Bash(uv sync:*)",
+      "Bash(uv venv:*)",
+      "Bash(uv pip install:*)",
+      "Bash(chmod:*)",
+      "Bash(inspect eval --help:*)",
+      "Bash(pkill:*)",
+      "Bash(__NEW_LINE__ export OPENAI_BASE_URL=\"http://127.0.0.1:8020/v1\")",
+      "Bash(export OPENAI_API_KEY=\"dummy\")",
+      "Bash(__NEW_LINE__ cd /workspace/petri)",
+      "Bash(inspect eval:*)",
+      "Bash(python /workspace/olmo/filter_petri_instructions.py:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(python:*)",
+      "Bash(ls:*)",
+      "Bash(xargs:*)"
+    ]
+  }
+}
