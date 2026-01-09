@@ -8,6 +8,8 @@ VLLM_PORT=8020
 VLLM_HOST="127.0.0.1"
 MAX_TURNS=20
 RESULTS_BASE_DIR="/workspace/olmo/petri-results"
+# Filtered instructions file (excludes tool-requiring samples since OLMo uses different tool format)
+INSTRUCTIONS_FILE="/workspace/olmo/petri_no_tools_instructions.txt"
 
 # Models to evaluate (HuggingFace model IDs)
 MODELS=(
@@ -101,6 +103,7 @@ run_evaluation() {
         -T "max_turns=${MAX_TURNS}" \
         -T "transcript_save_dir=${save_dir}" \
         -T "prefill=False" \
+        -T "special_instructions=${INSTRUCTIONS_FILE}" \
         --log-dir "${save_dir}/logs" \
         2>&1 | tee "${save_dir}/petri.log"
 
@@ -113,6 +116,7 @@ run_evaluation() {
 
 # Main loop
 echo "Starting Petri evaluations for ${#MODELS[@]} models"
+echo "Using filtered instructions (73 non-tool samples): ${INSTRUCTIONS_FILE}"
 echo ""
 
 for i in "${!MODELS[@]}"; do
