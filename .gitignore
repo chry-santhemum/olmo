@@ -8,6 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-vllm
 
 # Secrets
 .env
+
+# Files
+logs/
+bloom-data/
+trash/
+petri-results/
