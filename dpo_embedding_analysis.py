@@ -368,129 +368,131 @@ def plot_correlation(df: pd.DataFrame, output_dir: Path):
     print(f"Samples where DPO improved (nll_diff > 0): {(y > 0).sum()} ({100*(y > 0).mean():.1f}%)")
 
 
+
 # %% Load Dataset
-print("Loading dataset...")
-dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train")
-print(f"Dataset loaded: {len(dataset)} samples")
+if __name__ == "__main__":
+    print("Loading dataset...")
+    dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train")
+    print(f"Dataset loaded: {len(dataset)} samples")
 
-# %%
-subset = dataset.select(range(500))
-print(f"Will process {len(subset)} samples")
+    # %%
+    subset = dataset.select(range(500))
+    print(f"Will process {len(subset)} samples")
 
-# %% Prepare samples
-OUTPUT_DIR = Path("dpo_analysis")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-tokenizer = load_tokenizer(PRE_DPO_MODEL)
+    # %% Prepare samples
+    OUTPUT_DIR = Path("dpo_analysis")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tokenizer = load_tokenizer(PRE_DPO_MODEL)
 
-# Pre-extract all prompts and responses
-print("Extracting prompts and responses...")
-chosen_prompts = []
-chosen_responses = []
-rejected_prompts = []
-rejected_responses = []
-valid_indices = []
+    # Pre-extract all prompts and responses
+    print("Extracting prompts and responses...")
+    chosen_prompts = []
+    chosen_responses = []
+    rejected_prompts = []
+    rejected_responses = []
+    valid_indices = []
 
-for i, sample in enumerate(tqdm(subset, desc="Extracting")):
-    try:
-        prompt_c, response_c = extract_prompt_and_response(tokenizer, sample["chosen"])
-        prompt_r, response_r = extract_prompt_and_response(tokenizer, sample["rejected"])
-        if not response_c or not response_r:
-            print(f"Skipping sample {i} because no response")
+    for i, sample in enumerate(tqdm(subset, desc="Extracting")):
+        try:
+            prompt_c, response_c = extract_prompt_and_response(tokenizer, sample["chosen"])
+            prompt_r, response_r = extract_prompt_and_response(tokenizer, sample["rejected"])
+            if not response_c or not response_r:
+                print(f"Skipping sample {i} because no response")
+                continue
+            chosen_prompts.append(prompt_c)
+            chosen_responses.append(response_c)
+            rejected_prompts.append(prompt_r)
+            rejected_responses.append(response_r)
+            valid_indices.append(i)
+        except Exception as e:
+            print(f"Error extracting sample {i}: {e}")
             continue
-        chosen_prompts.append(prompt_c)
-        chosen_responses.append(response_c)
-        rejected_prompts.append(prompt_r)
-        rejected_responses.append(response_r)
-        valid_indices.append(i)
-    except Exception as e:
-        print(f"Error extracting sample {i}: {e}")
-        continue
 
-print(f"Extracted {len(valid_indices)} valid samples")
+    print(f"Extracted {len(valid_indices)} valid samples")
 
-# %% Phase 1: Process with pre-DPO model
-print("\n=== Phase 1: Processing with pre-DPO model ===")
+    # %% Phase 1: Process with pre-DPO model
+    print("\n=== Phase 1: Processing with pre-DPO model ===")
 
-pre_model = load_model(
-    PRE_DPO_MODEL,
-    torch_dtype=torch.bfloat16,
-    device_map="cuda",
-)
-
-print("Computing chosen response stats...")
-pre_chosen_stats = compute_response_stats_batch(
-    pre_model, tokenizer, chosen_prompts, chosen_responses, compute_hidden=True
-)
-
-print("Computing rejected response stats...")
-pre_rejected_stats = compute_response_stats_batch(
-    pre_model, tokenizer, rejected_prompts, rejected_responses, compute_hidden=True
-)
-
-# Free pre-model memory
-del pre_model
-_oom_cleanup()
-print("Pre-DPO processing complete.")
-
-# %% Phase 2: Process with post-DPO model
-print("\n=== Phase 2: Processing with post-DPO model ===")
-post_model = load_model(
-    POST_DPO_MODEL,
-    torch_dtype=torch.bfloat16,
-    device_map="cuda",
-)
-
-print("Computing chosen response stats (post-DPO)...")
-post_chosen_stats = compute_response_stats_batch(
-    post_model, tokenizer, chosen_prompts, chosen_responses, compute_hidden=False
-)
-
-# Free post-model memory
-del post_model
-_oom_cleanup()
-print("Post-DPO processing complete.")
-
-# %% Phase 3: Compute metrics and build results
-print("\n=== Phase 3: Computing metrics ===")
-results = []
-
-def compute_similarity_metric(
-    h_chosen: Float[Tensor, "hidden_dim"],
-    h_rejected: Float[Tensor, "hidden_dim"],
-) -> float:
-    return torch.norm(h_rejected - h_chosen).item()
-
-for i in range(len(valid_indices)):
-    similarity_metric = compute_similarity_metric(
-        pre_chosen_stats.hidden_sums[i],
-        pre_rejected_stats.hidden_sums[i],
+    pre_model = load_model(
+        PRE_DPO_MODEL,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
     )
 
-    nll_diff = pre_chosen_stats.nlls[i] - post_chosen_stats.nlls[i]
+    print("Computing chosen response stats...")
+    pre_chosen_stats = compute_response_stats_batch(
+        pre_model, tokenizer, chosen_prompts, chosen_responses, compute_hidden=True
+    )
 
-    results.append({
-        "idx": valid_indices[i],
-        "prompt_chosen": chosen_prompts[i][:500],
-        "response_chosen": chosen_responses[i][:500],
-        "response_rejected": rejected_responses[i][:500],
-        "pre_chosen_nll": pre_chosen_stats.nlls[i],
-        "pre_rejected_nll": pre_rejected_stats.nlls[i],
-        "post_chosen_nll": post_chosen_stats.nlls[i],
-        "similarity_metric": similarity_metric,
-        "nll_diff": nll_diff,
-        "chosen_hidden_norm": pre_chosen_stats.hidden_sums[i].norm().item(),
-        "rejected_hidden_norm": pre_rejected_stats.hidden_sums[i].norm().item(),
-    })
+    print("Computing rejected response stats...")
+    pre_rejected_stats = compute_response_stats_batch(
+        pre_model, tokenizer, rejected_prompts, rejected_responses, compute_hidden=True
+    )
 
-df = pd.DataFrame(results)
+    # Free pre-model memory
+    del pre_model
+    _oom_cleanup()
+    print("Pre-DPO processing complete.")
 
-csv_path = OUTPUT_DIR / "results.csv"
-df.to_csv(csv_path, index=False)
-print(f"Results saved to {csv_path}")
+    # %% Phase 2: Process with post-DPO model
+    print("\n=== Phase 2: Processing with post-DPO model ===")
+    post_model = load_model(
+        POST_DPO_MODEL,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
+    )
 
-# %% Phase 4: Visualization
-print("\n=== Phase 4: Generating plots ===")
-plot_correlation(df, OUTPUT_DIR)
+    print("Computing chosen response stats (post-DPO)...")
+    post_chosen_stats = compute_response_stats_batch(
+        post_model, tokenizer, chosen_prompts, chosen_responses, compute_hidden=False
+    )
 
-# %% Inspect results
-df.head(10)
+    # Free post-model memory
+    del post_model
+    _oom_cleanup()
+    print("Post-DPO processing complete.")
+
+    # %% Phase 3: Compute metrics and build results
+    print("\n=== Phase 3: Computing metrics ===")
+    results = []
+
+    def compute_similarity_metric(
+        h_chosen: Float[Tensor, "hidden_dim"],
+        h_rejected: Float[Tensor, "hidden_dim"],
+    ) -> float:
+        return torch.norm(h_rejected - h_chosen).item()
+
+    for i in range(len(valid_indices)):
+        similarity_metric = compute_similarity_metric(
+            pre_chosen_stats.hidden_sums[i],
+            pre_rejected_stats.hidden_sums[i],
+        )
+
+        nll_diff = pre_chosen_stats.nlls[i] - post_chosen_stats.nlls[i]
+
+        results.append({
+            "idx": valid_indices[i],
+            "prompt_chosen": chosen_prompts[i][:500],
+            "response_chosen": chosen_responses[i][:500],
+            "response_rejected": rejected_responses[i][:500],
+            "pre_chosen_nll": pre_chosen_stats.nlls[i],
+            "pre_rejected_nll": pre_rejected_stats.nlls[i],
+            "post_chosen_nll": post_chosen_stats.nlls[i],
+            "similarity_metric": similarity_metric,
+            "nll_diff": nll_diff,
+            "chosen_hidden_norm": pre_chosen_stats.hidden_sums[i].norm().item(),
+            "rejected_hidden_norm": pre_rejected_stats.hidden_sums[i].norm().item(),
+        })
+
+    df = pd.DataFrame(results)
+
+    csv_path = OUTPUT_DIR / "results.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"Results saved to {csv_path}")
+
+    # %% Phase 4: Visualization
+    print("\n=== Phase 4: Generating plots ===")
+    plot_correlation(df, OUTPUT_DIR)
+
+    # %% Inspect results
+    df.head(10)

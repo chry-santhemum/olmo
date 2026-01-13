@@ -19,3 +19,6 @@ bloom-data/
 trash/
 petri-results/
 petri-repeat-results/
+dpo_analysis/
+dpo_svd_analysis/
+sycophancy_eval/

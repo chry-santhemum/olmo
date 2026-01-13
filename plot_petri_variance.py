@@ -16,6 +16,7 @@ MODELS = [
     ("olmo-3-7b-think-sft", "SFT"),
     ("olmo-3-7b-instruct-sft", "Instruct SFT"),
     ("olmo-3-7b-instruct-dpo", "Instruct DPO"),
+    ("olmo-3-7b-instruct-final", "Instruct Final"),
 ]
 
 

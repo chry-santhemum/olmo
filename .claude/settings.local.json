@@ -21,7 +21,19 @@
       "Bash(git commit:*)",
       "Bash(python:*)",
       "Bash(ls:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "Bash(inspect info:*)",
+      "Bash(PYTHONPATH=/workspace/olmo inspect eval:*)",
+      "Bash(PYTHONPATH=/workspace/olmo python:*)",
+      "Bash(pgrep:*)",
+      "Bash(bash run_sycophancy_evals.sh:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(fuser:*)",
+      "Bash(ps:*)",
+      "Bash(kill:*)",
+      "Bash(git -C /workspace/olmo log:*)"
     ]
   }
 }

@@ -1,0 +1,7 @@
+# config.yaml
+
+model: allenai/Olmo-3-7B-Instruct
+host: "127.0.0.1"
+port: 8020
+dtype: "bfloat16"
+uvicorn-log-level: "info"
