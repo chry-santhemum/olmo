@@ -33,11 +33,39 @@
       "Bash(fuser:*)",
       "Bash(ps:*)",
       "Bash(kill:*)",
-      "Bash(git -C /workspace/olmo log:*)"
+      "Bash(git -C /workspace/olmo log:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(printf:*)",
+      "Bash(tput:*)",
+      "Bash(grep:*)"
     ]
   },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "orchestra-mcp"
   ],
-  "enableAllProjectMcpServers": true
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done"
+          }
+        ]
+      }
+    ]
+  }
 }
