@@ -37,7 +37,9 @@
       "WebFetch(domain:github.com)",
       "Bash(printf:*)",
       "Bash(tput:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "WebSearch",
+      "Bash(head:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

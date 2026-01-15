@@ -1,6 +1,9 @@
 # %% Imports and Configuration
 import gc
 import inspect
+import json
+import multiprocessing as mp
+import sys
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -17,7 +20,20 @@ from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Import hook utilities from introspection
+sys.path.insert(0, str(Path(__file__).parent.parent / "introspection"))
+from utils_model import get_module, get_resid_block_name
+
 # %%
+
+
+def _make_cpu_record_hook(layer_idx: int, captured: dict):
+    """Create hook that records hidden states directly to CPU."""
+    def hook(module, input, output):
+        hidden = output[0] if isinstance(output, tuple) else output
+        captured[layer_idx] = hidden.detach().cpu()  # Move to CPU immediately
+    return hook
+
 
 def _is_oom_exception(e: Exception) -> bool:
     msg = str(e)
@@ -31,14 +47,13 @@ def _is_oom_exception(e: Exception) -> bool:
         ))
     )
 
-def _oom_cleanup():
+def _oom_cleanup(device: int | str | None = None):
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        # Sometimes helps reclaim CUDA IPC allocations
-        torch.cuda.ipc_collect()
-        logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        logger.info(f"CUDA reserved memory: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        torch.cuda.ipc_collect()  # Sometimes helps reclaim CUDA IPC allocations
+        logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
+        logger.info(f"CUDA reserved memory: {torch.cuda.memory_reserved(device) / 1024**3:.2f} GB")
 
 def find_executable_batch_size(starting_batch_size: int, function=None):
     """Decorator that auto-reduces batch_size on OOM.
@@ -146,9 +161,13 @@ def compute_embedding_diffs(
     assert n == len(chosen_responses) == len(rejected_prompts) == len(rejected_responses)
 
     def _extract_mean_activations(
-        outputs, input_ids, attention_mask, prompt_lens: list[int], layers: list[int], actual_bs: int
+        outputs, captured_hidden: dict[int, Tensor], input_ids, attention_mask,
+        prompt_lens: list[int], layers: list[int], actual_bs: int
     ) -> tuple[list[float], list[dict[int, Tensor]]]:
-        """Extract NLLs and mean activations from model outputs."""
+        """Extract NLLs and mean activations from model outputs.
+
+        captured_hidden: dict mapping layer_idx -> tensor [batch, seq_len, hidden] on CPU
+        """
         nlls = []
         activations = []
         for i in range(actual_bs):
@@ -165,12 +184,12 @@ def compute_embedding_diffs(
             nll = F.cross_entropy(logits, labels, reduction="mean").item()
             nlls.append(nll)
 
-            # Mean activations per layer
+            # Mean activations per layer (captured_hidden is already on CPU)
             item_acts = {}
             for layer_idx in layers:
-                hidden = outputs.hidden_states[layer_idx]
+                hidden = captured_hidden[layer_idx]  # [batch, seq_len, hidden] on CPU
                 response_hidden = hidden[i, response_start:response_end]
-                item_acts[layer_idx] = response_hidden.mean(dim=0).cpu()
+                item_acts[layer_idx] = response_hidden.mean(dim=0)
             activations.append(item_acts)
         return nlls, activations
 
@@ -197,21 +216,42 @@ def compute_embedding_diffs(
         attention_mask = inputs["attention_mask"].to(device)
         prompt_lens = [len(tokenizer.encode(p, add_special_tokens=False)) for p in all_prompts]
 
+        # Register hooks to capture hidden states (moved to CPU immediately in hook)
+        captured_hidden: dict[int, Tensor] = {}
+        handles = []
+        for layer_idx in layers:
+            module = get_module(model, get_resid_block_name(model, layer_idx))
+            handle = module.register_forward_hook(_make_cpu_record_hook(layer_idx, captured_hidden))
+            handles.append(handle)
+
         outputs = None
         try:
             with torch.inference_mode():
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    output_hidden_states=True,
                 )
 
             nlls, activations = _extract_mean_activations(
-                outputs, input_ids, attention_mask, prompt_lens, layers, actual_bs * 2
+                outputs, captured_hidden, input_ids, attention_mask, prompt_lens, layers, actual_bs * 2
             )
         finally:
-            if outputs is not None:
+            # Always remove hooks
+            for handle in handles:
+                handle.remove()
+            # Clean up GPU tensors
+            try:
+                del input_ids
+            except Exception:
+                pass
+            try:
+                del attention_mask
+            except Exception:
+                pass
+            try:
                 del outputs
+            except Exception:
+                pass
 
         # Split results: first half is chosen, second half is rejected
         nlls_chosen = nlls[:actual_bs]
@@ -248,6 +288,8 @@ def compute_embedding_diffs(
         all_diffs.extend(diffs.activation_diffs)
         pbar.update(end_pos - start_pos)
         start_pos = end_pos
+        del diffs
+        _oom_cleanup()
 
     pbar.close()
     return EmbeddingDiffs(
@@ -344,83 +386,358 @@ def plot_correlation(df: pd.DataFrame, output_dir: Path):
 
 # %%
 
+
+def _load_manifest(manifest_path: Path) -> dict | None:
+    """Load manifest file if it exists."""
+    if manifest_path.exists():
+        with open(manifest_path) as f:
+            return json.load(f)
+    return None
+
+
+def _save_manifest(manifest_path: Path, manifest: dict) -> None:
+    """Save manifest file atomically."""
+    tmp_path = manifest_path.with_suffix(".tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    tmp_path.rename(manifest_path)
+
+
+def _save_chunk(chunk_path: Path, chunk_data: dict) -> None:
+    """Save a single chunk to disk."""
+    tmp_path = chunk_path.with_suffix(".tmp")
+    torch.save(chunk_data, tmp_path)
+    tmp_path.rename(chunk_path)
+
+
+def load_chunk(cache_dir: Path, chunk_idx: int) -> dict:
+    """Load a single chunk from the cache directory."""
+    chunk_path = cache_dir / f"chunk_{chunk_idx:04d}.pt"
+    if not chunk_path.exists():
+        raise FileNotFoundError(f"Chunk {chunk_idx} not found at {chunk_path}")
+    return torch.load(chunk_path)
+
+
+def load_manifest(cache_dir: Path) -> dict:
+    """Load manifest from cache directory."""
+    manifest_path = cache_dir / "manifest.json"
+    manifest = _load_manifest(manifest_path)
+    if manifest is None:
+        raise FileNotFoundError(f"No manifest found at {manifest_path}")
+    return manifest
+
+
+def _claim_next_chunk(cache_dir: Path, lock) -> int | None:
+    """Atomically claim the next uncompleted chunk.
+
+    Returns chunk index if one is available, None if all chunks are done or in progress.
+    """
+    manifest_path = cache_dir / "manifest.json"
+    with lock:
+        manifest = _load_manifest(manifest_path)
+        if manifest is None:
+            return None
+
+        completed = set(manifest["completed_chunks"])
+        in_progress = set(manifest.get("in_progress_chunks", []))
+
+        for chunk_idx in range(manifest["total_chunks"]):
+            if chunk_idx not in completed and chunk_idx not in in_progress:
+                manifest.setdefault("in_progress_chunks", []).append(chunk_idx)
+                _save_manifest(manifest_path, manifest)
+                return chunk_idx
+        return None
+
+
+def _mark_chunk_complete(cache_dir: Path, lock, chunk_idx: int) -> None:
+    """Mark a chunk as completed and remove from in_progress."""
+    manifest_path = cache_dir / "manifest.json"
+    with lock:
+        manifest = _load_manifest(manifest_path)
+        if manifest is None:
+            raise RuntimeError("Manifest not found")
+
+        # Move from in_progress to completed
+        in_progress = manifest.get("in_progress_chunks", [])
+        if chunk_idx in in_progress:
+            in_progress.remove(chunk_idx)
+        manifest["in_progress_chunks"] = in_progress
+
+        if chunk_idx not in manifest["completed_chunks"]:
+            manifest["completed_chunks"].append(chunk_idx)
+
+        _save_manifest(manifest_path, manifest)
+
+
+def _reset_in_progress_chunks(cache_dir: Path) -> None:
+    """Reset all in_progress chunks to unclaimed state (for recovery after crash)."""
+    manifest_path = cache_dir / "manifest.json"
+    manifest = _load_manifest(manifest_path)
+    if manifest is not None and manifest.get("in_progress_chunks"):
+        logger.warning(f"Resetting {len(manifest['in_progress_chunks'])} in_progress chunks")
+        manifest["in_progress_chunks"] = []
+        _save_manifest(manifest_path, manifest)
+
+
+def _gpu_worker(
+    gpu_id: int,
+    model_name: str,
+    layers: list[int],
+    batch_size: int,
+    chunk_size: int,
+    cache_dir: Path,
+    lock,
+    dataset_path: str,
+    num_samples: int,
+) -> None:
+    """Worker function that processes chunks on a specific GPU.
+
+    Each worker:
+    1. Loads the model on its assigned GPU
+    2. Loops claiming uncompleted chunks
+    3. Processes each chunk and saves it
+    4. Marks chunk as complete
+    """
+    device = f"cuda:{gpu_id}"
+    torch.cuda.set_device(gpu_id)  # Set default device for this process
+    logger.info(f"[GPU {gpu_id}] Starting worker on {device}")
+
+    # Load model on this GPU
+    model = load_model(model_name, torch_dtype=torch.bfloat16, device_map=device)
+    tokenizer = load_tokenizer(model_name)
+
+    # Load dataset (HF caches this so it's fast)
+    dataset = load_dataset(dataset_path, split="train")
+    dataset = dataset.filter(
+        lambda ex: (
+            ex["chosen"] is not None
+            and len(ex["chosen"]) >= 2
+            and ex["chosen"][0]["content"] is not None
+            and ex["chosen"][-1]["role"] == "assistant"
+            and ex["chosen"][-1]["content"] is not None
+            and ex["rejected"] is not None
+            and len(ex["rejected"]) >= 2
+            and ex["rejected"][0]["content"] is not None
+            and ex["rejected"][-1]["role"] == "assistant"
+            and ex["rejected"][-1]["content"] is not None
+        ),
+        num_proc=1,  # Single proc in worker to avoid nested multiprocessing issues
+    )
+    subset = dataset.select(range(min(num_samples, len(dataset))))
+
+    chunks_processed = 0
+    while True:
+        # Claim next available chunk
+        chunk_idx = _claim_next_chunk(cache_dir, lock)
+        if chunk_idx is None:
+            logger.info(f"[GPU {gpu_id}] No more chunks to process")
+            break
+
+        start_idx = chunk_idx * chunk_size
+        end_idx = min(start_idx + chunk_size, num_samples)
+        logger.info(f"[GPU {gpu_id}] Processing chunk {chunk_idx} (samples {start_idx}-{end_idx})")
+
+        # Extract prompts/responses for this chunk
+        chunk_chosen_prompts = []
+        chunk_chosen_responses = []
+        chunk_rejected_prompts = []
+        chunk_rejected_responses = []
+
+        for i in range(start_idx, end_idx):
+            sample = subset[i]
+            prompt_c, response_c = extract_prompt_response_text(tokenizer, sample["chosen"])
+            prompt_r, response_r = extract_prompt_response_text(tokenizer, sample["rejected"])
+            chunk_chosen_prompts.append(prompt_c)
+            chunk_chosen_responses.append(response_c)
+            chunk_rejected_prompts.append(prompt_r)
+            chunk_rejected_responses.append(response_r)
+
+        # Compute embedding diffs for this chunk
+        diffs = compute_embedding_diffs(
+            model,
+            tokenizer,
+            chunk_chosen_prompts,
+            chunk_chosen_responses,
+            chunk_rejected_prompts,
+            chunk_rejected_responses,
+            layers=layers,
+            batch_size=batch_size,
+        )
+
+        # Save chunk
+        chunk_data = {
+            "chunk_idx": chunk_idx,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "nlls_chosen": diffs.nlls_chosen,
+            "nlls_rejected": diffs.nlls_rejected,
+            "activation_diffs": diffs.activation_diffs,
+            "chosen_prompts": chunk_chosen_prompts,
+            "chosen_responses": chunk_chosen_responses,
+            "rejected_prompts": chunk_rejected_prompts,
+            "rejected_responses": chunk_rejected_responses,
+        }
+        chunk_path = cache_dir / f"chunk_{chunk_idx:04d}.pt"
+        _save_chunk(chunk_path, chunk_data)
+
+        # Mark complete
+        _mark_chunk_complete(cache_dir, lock, chunk_idx)
+        chunks_processed += 1
+        logger.info(f"[GPU {gpu_id}] Completed chunk {chunk_idx}")
+
+        # Cleanup
+        del diffs
+        _oom_cleanup(gpu_id)
+
+    del model
+    _oom_cleanup(gpu_id)
+    logger.info(f"[GPU {gpu_id}] Worker finished, processed {chunks_processed} chunks")
+
+
 def cache_embedding_diffs(
     model_name: str,
     num_samples: int,
     layers: list[int],
     batch_size: int,
+    chunk_size: int = 1000,
+    num_gpus: int | None = None,
+    dataset_name: str = "allenai/Dolci-Instruct-DPO",
     output_dir: Path = Path("dpo_embedding_analysis"),
-) -> dict:
-    """Cache embedding diffs with incremental layer support.
+) -> Path:
+    """Cache embedding diffs with checkpointing for large datasets.
 
-    Output path does NOT include layer numbers. If cache exists, only computes missing layers.
+    Processes data in chunks and saves incrementally to disk.
+    Supports resuming from last completed chunk if interrupted.
+    Supports multi-GPU processing when num_gpus > 1.
+
+    Args:
+        model_name: HuggingFace model name
+        num_samples: Number of samples to process
+        layers: Which layers to extract activations from
+        batch_size: Batch size for model forward pass
+        chunk_size: Number of samples per chunk (for checkpointing)
+        num_gpus: Number of GPUs to use (None = auto-detect)
+        dataset_name: HuggingFace dataset name
+        output_dir: Base output directory
+
+    Returns:
+        Path to cache directory containing chunks and manifest
     """
+    # Auto-detect GPUs if not specified
+    if num_gpus is None:
+        num_gpus = torch.cuda.device_count()
+    num_gpus = max(1, num_gpus)  # At least 1
+    logger.info(f"Using {num_gpus} GPU(s)")
+
     model_slug = model_name.split("/")[-1]
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{model_slug}-first_{num_samples}.pt"
+    cache_dir = output_dir / f"{model_slug}-{num_samples}"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = cache_dir / "manifest.json"
 
-    # Try to load existing cache
-    cache = None
-    existing_layers: set[int] = set()
-    if output_path.exists():
-        cache = torch.load(output_path)
-        existing_layers = set(cache["config"]["layers"])
-        logger.info(f"Loaded existing cache with layers {sorted(existing_layers)}")
+    # Load or create manifest
+    manifest = _load_manifest(manifest_path)
+    total_chunks = (num_samples + chunk_size - 1) // chunk_size
 
-    # Determine which layers to compute
-    layers_to_compute = [l for l in layers if l not in existing_layers]
-    if not layers_to_compute:
-        logger.info("All requested layers already cached")
-        return cache
+    if manifest is not None:
+        # Verify configuration matches
+        if manifest["model_name"] != model_name:
+            raise ValueError(f"Model mismatch: {manifest['model_name']} vs {model_name}")
+        if manifest["num_samples"] != num_samples:
+            raise ValueError(f"num_samples mismatch: {manifest['num_samples']} vs {num_samples}")
+        if set(manifest["layers"]) != set(layers):
+            raise ValueError(f"layers mismatch: {manifest['layers']} vs {layers}")
 
-    logger.info(f"Computing missing layers: {layers_to_compute}")
+        completed_chunks = set(manifest["completed_chunks"])
+        logger.info(f"Resuming from manifest: {len(completed_chunks)}/{total_chunks} chunks completed")
 
-    # Load dataset and extract prompts/responses (or reuse from cache)
-    if cache is not None:
-        chosen_prompts = cache["chosen_prompts"]
-        chosen_responses = cache["chosen_responses"]
-        rejected_prompts = cache["rejected_prompts"]
-        rejected_responses = cache["rejected_responses"]
+        # Reset any in_progress chunks from previous crashed run
+        _reset_in_progress_chunks(cache_dir)
     else:
-        logger.info("Loading dataset...")
-        dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train")
-        logger.info(f"Before filtering: {len(dataset)} samples")
-        dataset = dataset.filter(
-            lambda ex: (
-                ex["chosen"] is not None
-                and len(ex["chosen"]) >= 2
-                and ex["chosen"][0]["content"] is not None
-                and ex["chosen"][-1]["role"] == "assistant"
-                and ex["chosen"][-1]["content"] is not None
-                and ex["rejected"] is not None
-                and len(ex["rejected"]) >= 2
-                and ex["rejected"][0]["content"] is not None
-                and ex["rejected"][-1]["role"] == "assistant"
-                and ex["rejected"][-1]["content"] is not None
-            ),
-            num_proc=8,
-        )
-        logger.info(f"After filtering: {len(dataset)} samples")
+        completed_chunks = set()
+        manifest = {
+            "model_name": model_name,
+            "layers": layers,
+            "num_samples": num_samples,
+            "chunk_size": chunk_size,
+            "completed_chunks": [],
+            "in_progress_chunks": [],
+            "total_chunks": total_chunks,
+        }
+        _save_manifest(manifest_path, manifest)
+        logger.info(f"Created new manifest for {total_chunks} chunks")
 
-        subset = dataset.select(range(num_samples))
-        logger.info(f"Will process {len(subset)} samples")
+    # Check if all chunks complete
+    if len(completed_chunks) == total_chunks:
+        logger.info("All chunks already computed")
+        return cache_dir
 
-        tokenizer = load_tokenizer(model_name)
-        logger.info("Extracting prompts and responses...")
-        chosen_prompts = []
-        chosen_responses = []
-        rejected_prompts = []
-        rejected_responses = []
+    # Multi-GPU path: spawn workers
+    if num_gpus > 1:
+        logger.info(f"Starting {num_gpus} GPU workers...")
 
-        for sample in tqdm(subset, desc="Extracting"):
-            prompt_c, response_c = extract_prompt_response_text(tokenizer, sample["chosen"])
-            prompt_r, response_r = extract_prompt_response_text(tokenizer, sample["rejected"])
-            chosen_prompts.append(prompt_c)
-            chosen_responses.append(response_c)
-            rejected_prompts.append(prompt_r)
-            rejected_responses.append(response_r)
+        # Use spawn to avoid CUDA fork issues
+        ctx = mp.get_context("spawn")
+        manager = ctx.Manager()
+        lock = manager.Lock()
 
-    # Load model and compute diffs for missing layers
+        processes = []
+        for gpu_id in range(num_gpus):
+            p = ctx.Process(
+                target=_gpu_worker,
+                args=(
+                    gpu_id,
+                    model_name,
+                    layers,
+                    batch_size,
+                    chunk_size,
+                    cache_dir,
+                    lock,
+                    dataset_name,
+                    num_samples,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        # Wait for all workers to complete
+        for p in processes:
+            p.join()
+
+        logger.success(f"All {total_chunks} chunks saved to {cache_dir}")
+        return cache_dir
+
+    # Single-GPU path: process sequentially (original logic)
+    logger.info("Loading dataset...")
+    dataset = load_dataset(dataset_name, split="train")
+    logger.info(f"Before filtering: {len(dataset)} samples")
+    dataset = dataset.filter(
+        lambda ex: (
+            ex["chosen"] is not None
+            and len(ex["chosen"]) >= 2
+            and ex["chosen"][0]["content"] is not None
+            and ex["chosen"][-1]["role"] == "assistant"
+            and ex["chosen"][-1]["content"] is not None
+            and ex["rejected"] is not None
+            and len(ex["rejected"]) >= 2
+            and ex["rejected"][0]["content"] is not None
+            and ex["rejected"][-1]["role"] == "assistant"
+            and ex["rejected"][-1]["content"] is not None
+        ),
+        num_proc=8,
+    )
+    logger.info(f"After filtering: {len(dataset)} samples")
+
+    if len(dataset) < num_samples:
+        logger.warning(f"Only {len(dataset)} samples available, adjusting num_samples")
+        num_samples = len(dataset)
+        total_chunks = (num_samples + chunk_size - 1) // chunk_size
+        manifest["num_samples"] = num_samples
+        manifest["total_chunks"] = total_chunks
+        _save_manifest(manifest_path, manifest)
+
+    subset = dataset.select(range(num_samples))
+
+    # Load tokenizer and model
     tokenizer = load_tokenizer(model_name)
     model = load_model(
         model_name,
@@ -428,47 +745,71 @@ def cache_embedding_diffs(
         device_map="cuda",
     )
 
-    logger.info(f"Computing embedding diffs for layers {layers_to_compute}...")
-    new_diffs = compute_embedding_diffs(
-        model,
-        tokenizer,
-        chosen_prompts,
-        chosen_responses,
-        rejected_prompts,
-        rejected_responses,
-        layers=layers_to_compute,
-        batch_size=batch_size,
-    )
+    # Process chunks
+    chunks_to_process = [i for i in range(total_chunks) if i not in completed_chunks]
+    logger.info(f"Processing {len(chunks_to_process)} remaining chunks...")
+
+    for chunk_idx in tqdm(chunks_to_process, desc="Processing chunks"):
+        start_idx = chunk_idx * chunk_size
+        end_idx = min(start_idx + chunk_size, num_samples)
+
+        # Extract prompts/responses for this chunk
+        chunk_chosen_prompts = []
+        chunk_chosen_responses = []
+        chunk_rejected_prompts = []
+        chunk_rejected_responses = []
+
+        for i in range(start_idx, end_idx):
+            sample = subset[i]
+            prompt_c, response_c = extract_prompt_response_text(tokenizer, sample["chosen"])
+            prompt_r, response_r = extract_prompt_response_text(tokenizer, sample["rejected"])
+            chunk_chosen_prompts.append(prompt_c)
+            chunk_chosen_responses.append(response_c)
+            chunk_rejected_prompts.append(prompt_r)
+            chunk_rejected_responses.append(response_r)
+
+        # Compute embedding diffs for this chunk
+        diffs = compute_embedding_diffs(
+            model,
+            tokenizer,
+            chunk_chosen_prompts,
+            chunk_chosen_responses,
+            chunk_rejected_prompts,
+            chunk_rejected_responses,
+            layers=layers,
+            batch_size=batch_size,
+        )
+
+        # Save chunk
+        chunk_data = {
+            "chunk_idx": chunk_idx,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "nlls_chosen": diffs.nlls_chosen,
+            "nlls_rejected": diffs.nlls_rejected,
+            "activation_diffs": diffs.activation_diffs,
+            "chosen_prompts": chunk_chosen_prompts,
+            "chosen_responses": chunk_chosen_responses,
+            "rejected_prompts": chunk_rejected_prompts,
+            "rejected_responses": chunk_rejected_responses,
+        }
+        chunk_path = cache_dir / f"chunk_{chunk_idx:04d}.pt"
+        _save_chunk(chunk_path, chunk_data)
+
+        # Update manifest
+        manifest["completed_chunks"].append(chunk_idx)
+        _save_manifest(manifest_path, manifest)
+        logger.info(f"Saved chunk {chunk_idx} ({end_idx - start_idx} samples)")
+
+        # Cleanup
+        del diffs
+        _oom_cleanup()
 
     del model
     _oom_cleanup()
 
-    # Merge into existing cache or create new
-    if cache is None:
-        cache = {
-            "nlls_chosen": new_diffs.nlls_chosen,
-            "nlls_rejected": new_diffs.nlls_rejected,
-            "activation_diffs": new_diffs.activation_diffs,
-            "chosen_prompts": chosen_prompts,
-            "chosen_responses": chosen_responses,
-            "rejected_prompts": rejected_prompts,
-            "rejected_responses": rejected_responses,
-            "config": {
-                "model_name": model_name,
-                "layers": layers_to_compute,
-                "num_samples": num_samples,
-            },
-        }
-    else:
-        # Merge new layers into existing activation_diffs
-        for i, new_sample_diffs in enumerate(new_diffs.activation_diffs):
-            for layer_idx, diff in new_sample_diffs.items():
-                cache["activation_diffs"][i][layer_idx] = diff
-        cache["config"]["layers"] = sorted(existing_layers | set(layers_to_compute))
-
-    torch.save(cache, output_path)
-    logger.success(f"Embedding diffs cached to {output_path} (layers: {cache['config']['layers']})")
-    return cache
+    logger.success(f"All {total_chunks} chunks saved to {cache_dir}")
+    return cache_dir
 
     # # %% Phase 3: Compute metrics and build results
     # print("\n=== Phase 3: Computing metrics ===")

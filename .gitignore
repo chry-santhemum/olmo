@@ -20,5 +20,7 @@ trash/
 petri-results/
 petri-repeat-results/
 dpo_analysis/
+dpo_embedding_analysis/
 dpo_svd_analysis/
-sycophancy_eval/
+sycophancy_eval/results/
+eval_persona_extract/

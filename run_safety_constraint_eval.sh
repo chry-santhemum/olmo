@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-# Run format constraint experiment: DPO vs Final (RL) checkpoint comparison
-# Tests whether format constraints reduce Q&A accuracy differently across training stages
-# Results are broken down by source dataset and number of constraints (0, 1, 2, 3)
+# Run safety constraint experiment: DPO vs Final (RL) checkpoint comparison
+# Tests whether format constraints affect safety refusal rates on jailbreak prompts
+# Uses WildJailbreak adversarial harmful prompts with 0-3 format constraints
 
 # Track vLLM PID for cleanup
 VLLM_PID=""
@@ -35,11 +35,11 @@ RESULTS_BASE_DIR="/workspace/olmo/sycophancy_eval/results"
 MAX_CONNECTIONS=16
 
 # Dataset generation defaults
-N_PER_CONSTRAINT=256  # samples per dataset per constraint count (0,1,2,3)
+N_SAMPLES=256  # base prompts, creates 4x this many total (0,1,2,3 constraints)
 REGENERATE_DATASET=false
 
-# Grader model (external, not the model being evaluated)
-GRADER_MODEL="openrouter/openai/gpt-5-mini"
+# Judge model (external, not the model being evaluated)
+JUDGE_MODEL="openrouter/openai/gpt-5-mini"
 
 # Models to evaluate (only DPO and Final/RL)
 MODELS=(
@@ -52,13 +52,12 @@ MODEL_NAMES=(
 )
 
 # Single task
-TASK="format_constraint"
+TASK="safety_constraint"
 
 # Parse arguments
 RESUME_DIR=""
 DRY_RUN=false
 SKIP_ANALYSIS=false
-DATASETS=""  # Comma-separated list of source datasets to filter (empty = all)
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -70,8 +69,8 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
-        --n-per-constraint)
-            N_PER_CONSTRAINT="$2"
+        --n-samples)
+            N_SAMPLES="$2"
             REGENERATE_DATASET=true
             shift 2
             ;;
@@ -83,28 +82,21 @@ while [[ $# -gt 0 ]]; do
             SKIP_ANALYSIS=true
             shift
             ;;
-        --datasets)
-            DATASETS="$2"
-            shift 2
-            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
-            echo "Run format constraint evaluation on DPO and Final (RL) models."
-            echo "Tests whether IFEval-style format constraints reduce Q&A accuracy."
-            echo "Results are broken down by source dataset and constraint count (0-3)."
+            echo "Run safety constraint evaluation on DPO and Final (RL) models."
+            echo "Tests whether IFEval-style format constraints affect safety refusal rates"
+            echo "on WildJailbreak adversarial harmful prompts."
             echo ""
             echo "Options:"
-            echo "  --resume <dir>           Resume from a previous run directory"
-            echo "  --dry-run                Print what would be run without executing"
-            echo "  --n-per-constraint <n>   Samples per dataset per constraint count (default: 256)"
-            echo "  --regenerate-dataset     Force regenerate the dataset before running"
-            echo "  --skip-analysis          Skip generating the analysis figure"
-            echo "  --datasets <list>        Comma-separated list of source datasets to evaluate"
-            echo "                           Example: --datasets math_mc_cot,mmlu_mc_cot,truthful_qa"
+            echo "  --resume <dir>        Resume from a previous run directory"
+            echo "  --dry-run             Print what would be run without executing"
+            echo "  --n-samples <n>       Base prompts to sample (default: 256, creates 4x total)"
+            echo "  --regenerate-dataset  Force regenerate the dataset before running"
+            echo "  --skip-analysis       Skip generating the analysis figure"
             echo ""
-            echo "Source datasets: trivia_qa, truthful_qa, truthful_qa_mc, aqua_mc, math_mc_cot, mmlu_mc_cot"
-            echo "Total samples: 6 datasets × 4 constraint levels × N samples = 24N samples"
+            echo "Total samples: N base prompts × 4 constraint levels = 4N samples"
             exit 0
             ;;
         *)
@@ -123,11 +115,11 @@ mkdir -p "$RESULTS_BASE_DIR"
 
 # Regenerate dataset if requested
 if [ "$REGENERATE_DATASET" = true ]; then
-    echo "Regenerating format_constraint dataset..."
-    echo "  --n-per-constraint: $N_PER_CONSTRAINT"
+    echo "Regenerating safety_constraint dataset..."
+    echo "  --n-samples: $N_SAMPLES"
     source "$EVAL_VENV/bin/activate"
-    python /workspace/olmo/sycophancy_eval/create_format_constraint_dataset.py \
-        --n-per-constraint "$N_PER_CONSTRAINT"
+    python /workspace/olmo/sycophancy_eval/create_safety_constraint_dataset.py \
+        --n-samples "$N_SAMPLES"
     echo ""
 fi
 
@@ -175,7 +167,7 @@ if [ ${#MISSING_EVALS[@]} -eq 0 ]; then
         echo ""
         echo "Running analysis..."
         source "$EVAL_VENV/bin/activate"
-        python /workspace/olmo/sycophancy_eval/analyze_format_constraint.py \
+        python /workspace/olmo/sycophancy_eval/analyze_safety_constraint.py \
             --results-dir "$EXPERIMENT_DIR"
     fi
     exit 0
@@ -222,30 +214,22 @@ kill_vllm_server() {
     sleep 2
 }
 
-run_format_constraint() {
+run_safety_constraint() {
     local model_id="$1"
     local model_name="$2"
     local save_dir="${EXPERIMENT_DIR}/${model_name}"
 
     mkdir -p "$save_dir"
 
-    echo "Running format_constraint for ${model_name}..."
-
-    # Build datasets filter argument if specified
-    local datasets_arg=""
-    if [ -n "$DATASETS" ]; then
-        datasets_arg="-T datasets=$DATASETS"
-        echo "  Filtering to datasets: $DATASETS"
-    fi
+    echo "Running safety_constraint for ${model_name}..."
 
     # Run all samples (dataset already has correct structure)
-    inspect eval sycophancy_eval/tasks/format_constraint.py \
+    inspect eval sycophancy_eval/tasks/safety_constraint.py \
         --model "openai/${model_id}" \
         --max-connections "$MAX_CONNECTIONS" \
-        -T "grader_model=$GRADER_MODEL" \
-        $datasets_arg \
-        --log-dir "${save_dir}/format_constraint" \
-        2>&1 | tee "${save_dir}/format_constraint.log"
+        -T "judge_model=$JUDGE_MODEL" \
+        --log-dir "${save_dir}/safety_constraint" \
+        2>&1 | tee "${save_dir}/safety_constraint.log"
 }
 
 run_model() {
@@ -288,7 +272,7 @@ run_model() {
 
     cd /workspace/olmo
 
-    run_format_constraint "$model_id" "$model_name"
+    run_safety_constraint "$model_id" "$model_name"
 
     # Stop vLLM server
     kill_vllm_server
@@ -298,7 +282,7 @@ run_model() {
 }
 
 # Main loop
-echo "Starting format constraint evaluation"
+echo "Starting safety constraint evaluation"
 echo "Experiment: $EXPERIMENT_DIR"
 echo ""
 
@@ -316,7 +300,7 @@ if [ "$SKIP_ANALYSIS" = false ]; then
     echo "Running analysis..."
     source "$EVAL_VENV/bin/activate"
     export PYTHONPATH="/workspace/olmo:${PYTHONPATH}"
-    python /workspace/olmo/sycophancy_eval/analyze_format_constraint.py \
+    python /workspace/olmo/sycophancy_eval/analyze_safety_constraint.py \
         --results-dir "$EXPERIMENT_DIR"
 fi
 
