@@ -1,9 +1,7 @@
 # %% Imports and Configuration
 import gc
 import inspect
-from tqdm import tqdm
 from dataclasses import dataclass
-from typing import Optional
 from functools import partial
 from pathlib import Path
 
@@ -14,16 +12,12 @@ import scipy.stats
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
-from jaxtyping import Float
 from loguru import logger
 from torch import Tensor
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # %%
-# Configuration
-PRE_DPO_MODEL = "allenai/Olmo-3-7B-Instruct-SFT"
-POST_DPO_MODEL = "allenai/Olmo-3-7B-Instruct-DPO"
-STARTING_BATCH_SIZE = 8
 
 def _is_oom_exception(e: Exception) -> bool:
     msg = str(e)
@@ -85,27 +79,23 @@ def find_executable_batch_size(starting_batch_size: int, function=None):
 
     return decorator
 
-@dataclass
-class ResponseStats:
-    nll: float
-    hidden_sum: Float[Tensor, "hidden_dim"] | None
-
 
 @dataclass
-class BatchResponseStats:
-    """Stats for a batch of responses."""
-    nlls: list[float]
-    hidden_sums: list[Tensor] | None
+class EmbeddingDiffs:
+    """Activation diffs (chosen - rejected) and NLLs for a batch."""
+    nlls_chosen: list[float]
+    nlls_rejected: list[float]
+    activation_diffs: list[dict[int, Tensor]]  # chosen - rejected per layer
 
 
 def load_model(model_name: str, **kwargs):
     """Load model in eval mode with gradients disabled."""
-    print(f"Loading model: {model_name}")
+    logger.info(f"Loading model: {model_name}")
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
-    print("Model loaded (eval mode, grads disabled)")
+    logger.success("Model loaded (eval mode, grads disabled)")
     return model
 
 
@@ -117,173 +107,11 @@ def load_tokenizer(model_name: str):
     return tokenizer
 
 
-def _compute_stats_for_slice_inner(
-    batch_size: int,
-    model,
-    tokenizer,
-    prompt_texts: list[str],
-    response_texts: list[str],
-    start_pos: int,
-    compute_hidden: bool = True,
-) -> tuple[BatchResponseStats, int]:
-    """
-    Compute stats for a single slice: indices [start_pos : start_pos + batch_size).
-    Returns (stats_for_slice, end_pos).
-    """
-    device = next(model.parameters()).device
-    n = len(prompt_texts)
-    end_pos = min(start_pos + batch_size, n)
-
-    batch_prompts = prompt_texts[start_pos:end_pos]
-    batch_responses = response_texts[start_pos:end_pos]
-    actual_bs = len(batch_prompts)
-    if actual_bs == 0:
-        return BatchResponseStats(nlls=[], hidden_sums=[] if compute_hidden else None), end_pos
-
-    # Tokenize each sample separately (keeps per-sample prompt/response boundaries)
-    batch_input_ids: list[list[int]] = []
-    batch_prompt_lens: list[int] = []
-    batch_response_lens: list[int] = []
-
-    for prompt, response in zip(batch_prompts, batch_responses):
-        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        response_ids = tokenizer(response, add_special_tokens=False)["input_ids"]
-        full_ids = prompt_ids + response_ids
-
-        batch_input_ids.append(full_ids)
-        batch_prompt_lens.append(len(prompt_ids))
-        batch_response_lens.append(len(response_ids))
-
-    # Left-pad to the max length in this slice
-    max_len = max(len(ids) for ids in batch_input_ids)
-    padded_ids: list[list[int]] = []
-    attention_masks: list[list[int]] = []
-
-    for ids in batch_input_ids:
-        pad_len = max_len - len(ids)
-        padded_ids.append([tokenizer.pad_token_id] * pad_len + ids)
-        attention_masks.append([0] * pad_len + [1] * len(ids))
-
-    input_ids = torch.tensor(padded_ids, device=device)
-    attention_mask = torch.tensor(attention_masks, device=device)
-
-    slice_nlls: list[float] = []
-    slice_hidden_sums: Optional[list[Tensor]] = [] if compute_hidden else None
-
-    outputs = None
-    try:
-        with torch.inference_mode():
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=compute_hidden,
-            )
-
-        for i in range(actual_bs):
-            pad_len = max_len - len(batch_input_ids[i])
-            prompt_len = batch_prompt_lens[i]
-            response_len = batch_response_lens[i]
-
-            if response_len == 0:
-                slice_nlls.append(float("nan"))
-                if compute_hidden:
-                    slice_hidden_sums.append(torch.zeros(model.config.hidden_size))
-                continue
-
-            seq_start = pad_len
-            prompt_end = seq_start + prompt_len
-            seq_end = prompt_end + response_len
-
-            # logits[prompt_end-1:seq_end-1] predict labels[prompt_end:seq_end]
-            logits = outputs.logits[i, prompt_end - 1 : seq_end - 1]
-            labels = input_ids[i, prompt_end:seq_end]
-            nll = F.cross_entropy(logits, labels, reduction="mean").item()
-            slice_nlls.append(nll)
-
-            if compute_hidden:
-                last_hidden = outputs.hidden_states[-1]
-                response_hidden = last_hidden[i, prompt_end:seq_end]
-                hidden_sum = response_hidden.sum(dim=0).cpu()
-                slice_hidden_sums.append(hidden_sum)
-    finally:
-        if outputs is not None:
-            try:
-                del outputs
-            except Exception:
-                pass
-
-    return BatchResponseStats(nlls=slice_nlls, hidden_sums=slice_hidden_sums), end_pos
-
-# --- NEW: outer driver that resets batch size each slice ---
-
-def compute_response_stats_batch(
-    model,
-    tokenizer,
-    prompt_texts: list[str],
-    response_texts: list[str],
-    compute_hidden: bool = True,
-    starting_batch_size: int = STARTING_BATCH_SIZE,
-) -> BatchResponseStats:
-    """
-    Process the dataset in slices. Each slice starts at `start_pos` and attempts `starting_batch_size`.
-    If OOM occurs for that slice, the decorator halves batch size until it fits, then the NEXT slice
-    starts again at `starting_batch_size`.
-    """
-    assert len(prompt_texts) == len(response_texts), "prompt_texts and response_texts must align"
-    n = len(prompt_texts)
-
-    decorated_slice_fn = find_executable_batch_size(starting_batch_size)(_compute_stats_for_slice_inner)
-
-    all_nlls: list[float] = [float("nan")] * n
-    all_hidden_sums: Optional[list[Tensor]] = [None] * n if compute_hidden else None  # type: ignore
-
-    start_pos = 0
-    pbar = tqdm(total=n, desc="Processing slices")
-
-    while start_pos < n:
-        stats, end_pos = decorated_slice_fn(
-            model,
-            tokenizer,
-            prompt_texts,
-            response_texts,
-            start_pos,
-            compute_hidden,
-        )
-
-        # write back into full arrays
-        all_nlls[start_pos:end_pos] = stats.nlls
-        if compute_hidden and all_hidden_sums is not None:
-            all_hidden_sums[start_pos:end_pos] = stats.hidden_sums  # type: ignore
-
-        pbar.update(end_pos - start_pos)
-        start_pos = end_pos
-
-    pbar.close()
-    return BatchResponseStats(nlls=all_nlls, hidden_sums=all_hidden_sums)
-
-
-# def compute_similarity_metric(
-#     h_chosen: Float[Tensor, "hidden_dim"],
-#     h_rejected: Float[Tensor, "hidden_dim"],
-# ) -> float:
-#     """Compute similarity metric: dot(h_chosen, h_rejected - h_chosen).
-
-#     Lower absolute value indicates more similar embeddings.
-#     """
-#     diff = h_rejected - h_chosen
-#     return torch.dot(h_chosen, diff).item()
-
-def compute_similarity_metric(
-    h_chosen: Float[Tensor, "hidden_dim"],
-    h_rejected: Float[Tensor, "hidden_dim"],
-) -> float:
-    return torch.norm(h_rejected - h_chosen).item()
-
-def extract_prompt_and_response(
+def extract_prompt_response_text(
     tokenizer,
     messages: list[dict],
 ) -> tuple[str, str]:
-    """Extract prompt and response from multi-turn conversation."""
+    """Extract FORMATTED prompt and response from multi-turn conversation."""
     if len(messages) < 2:
         raise ValueError(f"Need at least 2 messages, got {len(messages)}")
 
@@ -302,13 +130,158 @@ def extract_prompt_and_response(
     return prompt_text, response_text
 
 
+def compute_embedding_diffs(
+    model,
+    tokenizer,
+    chosen_prompts: list[str],
+    chosen_responses: list[str],
+    rejected_prompts: list[str],
+    rejected_responses: list[str],
+    layers: list[int],
+    batch_size: int,
+) -> EmbeddingDiffs:
+    """Compute activation diffs (chosen - rejected) for each sample."""
+    device = next(model.parameters()).device
+    n = len(chosen_prompts)
+    assert n == len(chosen_responses) == len(rejected_prompts) == len(rejected_responses)
+
+    def _extract_mean_activations(
+        outputs, input_ids, attention_mask, prompt_lens: list[int], layers: list[int], actual_bs: int
+    ) -> tuple[list[float], list[dict[int, Tensor]]]:
+        """Extract NLLs and mean activations from model outputs."""
+        nlls = []
+        activations = []
+        for i in range(actual_bs):
+            seq_len = attention_mask[i].sum().item()
+            prompt_len = prompt_lens[i]
+            response_start, response_end = prompt_len, seq_len
+
+            if response_end - response_start <= 0:
+                raise ValueError(f"Response length <= 0 for sample {i}; please filter your data.")
+
+            # NLL
+            logits = outputs.logits[i, response_start - 1 : response_end - 1]
+            labels = input_ids[i, response_start:response_end]
+            nll = F.cross_entropy(logits, labels, reduction="mean").item()
+            nlls.append(nll)
+
+            # Mean activations per layer
+            item_acts = {}
+            for layer_idx in layers:
+                hidden = outputs.hidden_states[layer_idx]
+                response_hidden = hidden[i, response_start:response_end]
+                item_acts[layer_idx] = response_hidden.mean(dim=0).cpu()
+            activations.append(item_acts)
+        return nlls, activations
+
+    def _compute_diffs_inner(batch_size: int, start_pos: int) -> tuple[EmbeddingDiffs, int]:
+        """Process a slice of samples, computing diffs."""
+        end_pos = min(start_pos + batch_size, n)
+        actual_bs = end_pos - start_pos
+        if actual_bs == 0:
+            return EmbeddingDiffs(nlls_chosen=[], nlls_rejected=[], activation_diffs=[]), end_pos
+
+        # Prepare batch: interleave chosen and rejected for same forward pass
+        batch_chosen_prompts = chosen_prompts[start_pos:end_pos]
+        batch_chosen_responses = chosen_responses[start_pos:end_pos]
+        batch_rejected_prompts = rejected_prompts[start_pos:end_pos]
+        batch_rejected_responses = rejected_responses[start_pos:end_pos]
+
+        # Concatenate chosen + rejected into one batch
+        all_prompts = batch_chosen_prompts + batch_rejected_prompts
+        all_responses = batch_chosen_responses + batch_rejected_responses
+        full_texts = [p + r for p, r in zip(all_prompts, all_responses)]
+
+        inputs = tokenizer(full_texts, return_tensors="pt", padding=True, padding_side="right")
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+        prompt_lens = [len(tokenizer.encode(p, add_special_tokens=False)) for p in all_prompts]
+
+        outputs = None
+        try:
+            with torch.inference_mode():
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+
+            nlls, activations = _extract_mean_activations(
+                outputs, input_ids, attention_mask, prompt_lens, layers, actual_bs * 2
+            )
+        finally:
+            if outputs is not None:
+                del outputs
+
+        # Split results: first half is chosen, second half is rejected
+        nlls_chosen = nlls[:actual_bs]
+        nlls_rejected = nlls[actual_bs:]
+        acts_chosen = activations[:actual_bs]
+        acts_rejected = activations[actual_bs:]
+
+        # Compute diffs
+        activation_diffs = []
+        for c_acts, r_acts in zip(acts_chosen, acts_rejected):
+            diff = {layer: c_acts[layer] - r_acts[layer] for layer in layers}
+            activation_diffs.append(diff)
+
+        return EmbeddingDiffs(
+            nlls_chosen=nlls_chosen,
+            nlls_rejected=nlls_rejected,
+            activation_diffs=activation_diffs,
+        ), end_pos
+
+    # Note: batch_size here refers to number of *pairs*, so we process 2x that many samples
+    decorated_inner = find_executable_batch_size(starting_batch_size=batch_size)(_compute_diffs_inner)
+
+    all_nlls_chosen: list[float] = []
+    all_nlls_rejected: list[float] = []
+    all_diffs: list[dict[int, Tensor]] = []
+
+    start_pos = 0
+    pbar = tqdm(total=n, desc="Computing embedding diffs")
+
+    while start_pos < n:
+        diffs, end_pos = decorated_inner(start_pos)
+        all_nlls_chosen.extend(diffs.nlls_chosen)
+        all_nlls_rejected.extend(diffs.nlls_rejected)
+        all_diffs.extend(diffs.activation_diffs)
+        pbar.update(end_pos - start_pos)
+        start_pos = end_pos
+
+    pbar.close()
+    return EmbeddingDiffs(
+        nlls_chosen=all_nlls_chosen,
+        nlls_rejected=all_nlls_rejected,
+        activation_diffs=all_diffs,
+    )
+
+
+# def compute_similarity_metric(
+#     h_chosen: Float[Tensor, "hidden_dim"],
+#     h_rejected: Float[Tensor, "hidden_dim"],
+# ) -> float:
+#     """Compute similarity metric: dot(h_chosen, h_rejected - h_chosen).
+
+#     Lower absolute value indicates more similar embeddings.
+#     """
+#     diff = h_rejected - h_chosen
+#     return torch.dot(h_chosen, diff).item()
+
+# def compute_similarity_metric(
+#     h_chosen: Float[Tensor, "hidden_dim"],
+#     h_rejected: Float[Tensor, "hidden_dim"],
+# ) -> float:
+#     return torch.norm(h_rejected - h_chosen).item()
+
+
 # %% Visualization Functions
 def plot_correlation(df: pd.DataFrame, output_dir: Path):
     """Plot correlation between similarity metric and NLL diff."""
     valid_df = df.dropna(subset=["similarity_metric", "nll_diff"])
 
     if len(valid_df) < 10:
-        print("Not enough valid samples for plotting")
+        logger.warning("Not enough valid samples for plotting")
         return
 
     x = valid_df["similarity_metric"].values
@@ -339,7 +312,7 @@ def plot_correlation(df: pd.DataFrame, output_dir: Path):
     plot_path = output_dir / "correlation_plot.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.show()
-    print(f"Plot saved to {plot_path}")
+    logger.info(f"Plot saved to {plot_path}")
 
     # Distributions
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -357,142 +330,187 @@ def plot_correlation(df: pd.DataFrame, output_dir: Path):
     hist_path = output_dir / "distributions.png"
     plt.savefig(hist_path, dpi=150, bbox_inches="tight")
     plt.show()
-    print(f"Distributions plot saved to {hist_path}")
+    logger.info(f"Distributions plot saved to {hist_path}")
 
-    print("\n=== Summary Statistics ===")
-    print(f"Samples: {len(valid_df)}")
-    print(f"Pearson correlation: r={pearson_r:.4f}, p={pearson_p:.2e}")
-    print(f"Spearman correlation: rho={spearman_r:.4f}, p={spearman_p:.2e}")
-    print(f"Similarity metric: mean={x.mean():.2e}, std={x.std():.2e}")
-    print(f"NLL diff: mean={y.mean():.4f}, std={y.std():.4f}")
-    print(f"Samples where DPO improved (nll_diff > 0): {(y > 0).sum()} ({100*(y > 0).mean():.1f}%)")
+    logger.info("=== Summary Statistics ===")
+    logger.info(f"Samples: {len(valid_df)}")
+    logger.info(f"Pearson correlation: r={pearson_r:.4f}, p={pearson_p:.2e}")
+    logger.info(f"Spearman correlation: rho={spearman_r:.4f}, p={spearman_p:.2e}")
+    logger.info(f"Similarity metric: mean={x.mean():.2e}, std={x.std():.2e}")
+    logger.info(f"NLL diff: mean={y.mean():.4f}, std={y.std():.4f}")
+    logger.info(f"Samples where DPO improved (nll_diff > 0): {(y > 0).sum()} ({100*(y > 0).mean():.1f}%)")
 
 
 
-# %% Load Dataset
-if __name__ == "__main__":
-    print("Loading dataset...")
-    dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train")
-    print(f"Dataset loaded: {len(dataset)} samples")
+# %%
 
-    # %%
-    subset = dataset.select(range(500))
-    print(f"Will process {len(subset)} samples")
+def cache_embedding_diffs(
+    model_name: str,
+    num_samples: int,
+    layers: list[int],
+    batch_size: int,
+    output_dir: Path = Path("dpo_embedding_analysis"),
+) -> dict:
+    """Cache embedding diffs with incremental layer support.
 
-    # %% Prepare samples
-    OUTPUT_DIR = Path("dpo_analysis")
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    tokenizer = load_tokenizer(PRE_DPO_MODEL)
+    Output path does NOT include layer numbers. If cache exists, only computes missing layers.
+    """
+    model_slug = model_name.split("/")[-1]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{model_slug}-first_{num_samples}.pt"
 
-    # Pre-extract all prompts and responses
-    print("Extracting prompts and responses...")
-    chosen_prompts = []
-    chosen_responses = []
-    rejected_prompts = []
-    rejected_responses = []
-    valid_indices = []
+    # Try to load existing cache
+    cache = None
+    existing_layers: set[int] = set()
+    if output_path.exists():
+        cache = torch.load(output_path)
+        existing_layers = set(cache["config"]["layers"])
+        logger.info(f"Loaded existing cache with layers {sorted(existing_layers)}")
 
-    for i, sample in enumerate(tqdm(subset, desc="Extracting")):
-        try:
-            prompt_c, response_c = extract_prompt_and_response(tokenizer, sample["chosen"])
-            prompt_r, response_r = extract_prompt_and_response(tokenizer, sample["rejected"])
-            if not response_c or not response_r:
-                print(f"Skipping sample {i} because no response")
-                continue
+    # Determine which layers to compute
+    layers_to_compute = [l for l in layers if l not in existing_layers]
+    if not layers_to_compute:
+        logger.info("All requested layers already cached")
+        return cache
+
+    logger.info(f"Computing missing layers: {layers_to_compute}")
+
+    # Load dataset and extract prompts/responses (or reuse from cache)
+    if cache is not None:
+        chosen_prompts = cache["chosen_prompts"]
+        chosen_responses = cache["chosen_responses"]
+        rejected_prompts = cache["rejected_prompts"]
+        rejected_responses = cache["rejected_responses"]
+    else:
+        logger.info("Loading dataset...")
+        dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train")
+        logger.info(f"Before filtering: {len(dataset)} samples")
+        dataset = dataset.filter(
+            lambda ex: (
+                ex["chosen"] is not None
+                and len(ex["chosen"]) >= 2
+                and ex["chosen"][0]["content"] is not None
+                and ex["chosen"][-1]["role"] == "assistant"
+                and ex["chosen"][-1]["content"] is not None
+                and ex["rejected"] is not None
+                and len(ex["rejected"]) >= 2
+                and ex["rejected"][0]["content"] is not None
+                and ex["rejected"][-1]["role"] == "assistant"
+                and ex["rejected"][-1]["content"] is not None
+            ),
+            num_proc=8,
+        )
+        logger.info(f"After filtering: {len(dataset)} samples")
+
+        subset = dataset.select(range(num_samples))
+        logger.info(f"Will process {len(subset)} samples")
+
+        tokenizer = load_tokenizer(model_name)
+        logger.info("Extracting prompts and responses...")
+        chosen_prompts = []
+        chosen_responses = []
+        rejected_prompts = []
+        rejected_responses = []
+
+        for sample in tqdm(subset, desc="Extracting"):
+            prompt_c, response_c = extract_prompt_response_text(tokenizer, sample["chosen"])
+            prompt_r, response_r = extract_prompt_response_text(tokenizer, sample["rejected"])
             chosen_prompts.append(prompt_c)
             chosen_responses.append(response_c)
             rejected_prompts.append(prompt_r)
             rejected_responses.append(response_r)
-            valid_indices.append(i)
-        except Exception as e:
-            print(f"Error extracting sample {i}: {e}")
-            continue
 
-    print(f"Extracted {len(valid_indices)} valid samples")
-
-    # %% Phase 1: Process with pre-DPO model
-    print("\n=== Phase 1: Processing with pre-DPO model ===")
-
-    pre_model = load_model(
-        PRE_DPO_MODEL,
+    # Load model and compute diffs for missing layers
+    tokenizer = load_tokenizer(model_name)
+    model = load_model(
+        model_name,
         torch_dtype=torch.bfloat16,
         device_map="cuda",
     )
 
-    print("Computing chosen response stats...")
-    pre_chosen_stats = compute_response_stats_batch(
-        pre_model, tokenizer, chosen_prompts, chosen_responses, compute_hidden=True
+    logger.info(f"Computing embedding diffs for layers {layers_to_compute}...")
+    new_diffs = compute_embedding_diffs(
+        model,
+        tokenizer,
+        chosen_prompts,
+        chosen_responses,
+        rejected_prompts,
+        rejected_responses,
+        layers=layers_to_compute,
+        batch_size=batch_size,
     )
 
-    print("Computing rejected response stats...")
-    pre_rejected_stats = compute_response_stats_batch(
-        pre_model, tokenizer, rejected_prompts, rejected_responses, compute_hidden=True
-    )
-
-    # Free pre-model memory
-    del pre_model
+    del model
     _oom_cleanup()
-    print("Pre-DPO processing complete.")
 
-    # %% Phase 2: Process with post-DPO model
-    print("\n=== Phase 2: Processing with post-DPO model ===")
-    post_model = load_model(
-        POST_DPO_MODEL,
-        torch_dtype=torch.bfloat16,
-        device_map="cuda",
-    )
+    # Merge into existing cache or create new
+    if cache is None:
+        cache = {
+            "nlls_chosen": new_diffs.nlls_chosen,
+            "nlls_rejected": new_diffs.nlls_rejected,
+            "activation_diffs": new_diffs.activation_diffs,
+            "chosen_prompts": chosen_prompts,
+            "chosen_responses": chosen_responses,
+            "rejected_prompts": rejected_prompts,
+            "rejected_responses": rejected_responses,
+            "config": {
+                "model_name": model_name,
+                "layers": layers_to_compute,
+                "num_samples": num_samples,
+            },
+        }
+    else:
+        # Merge new layers into existing activation_diffs
+        for i, new_sample_diffs in enumerate(new_diffs.activation_diffs):
+            for layer_idx, diff in new_sample_diffs.items():
+                cache["activation_diffs"][i][layer_idx] = diff
+        cache["config"]["layers"] = sorted(existing_layers | set(layers_to_compute))
 
-    print("Computing chosen response stats (post-DPO)...")
-    post_chosen_stats = compute_response_stats_batch(
-        post_model, tokenizer, chosen_prompts, chosen_responses, compute_hidden=False
-    )
+    torch.save(cache, output_path)
+    logger.success(f"Embedding diffs cached to {output_path} (layers: {cache['config']['layers']})")
+    return cache
 
-    # Free post-model memory
-    del post_model
-    _oom_cleanup()
-    print("Post-DPO processing complete.")
+    # # %% Phase 3: Compute metrics and build results
+    # print("\n=== Phase 3: Computing metrics ===")
+    # results = []
 
-    # %% Phase 3: Compute metrics and build results
-    print("\n=== Phase 3: Computing metrics ===")
-    results = []
+    # def compute_similarity_metric(
+    #     h_chosen: Float[Tensor, "hidden_dim"],
+    #     h_rejected: Float[Tensor, "hidden_dim"],
+    # ) -> float:
+    #     return torch.norm(h_rejected - h_chosen).item()
 
-    def compute_similarity_metric(
-        h_chosen: Float[Tensor, "hidden_dim"],
-        h_rejected: Float[Tensor, "hidden_dim"],
-    ) -> float:
-        return torch.norm(h_rejected - h_chosen).item()
+    # for i in range(len(valid_indices)):
+    #     similarity_metric = compute_similarity_metric(
+    #         pre_chosen_stats.hidden_sums[i],
+    #         pre_rejected_stats.hidden_sums[i],
+    #     )
 
-    for i in range(len(valid_indices)):
-        similarity_metric = compute_similarity_metric(
-            pre_chosen_stats.hidden_sums[i],
-            pre_rejected_stats.hidden_sums[i],
-        )
+    #     nll_diff = pre_chosen_stats.nlls[i] - post_chosen_stats.nlls[i]
 
-        nll_diff = pre_chosen_stats.nlls[i] - post_chosen_stats.nlls[i]
+    #     results.append({
+    #         "idx": valid_indices[i],
+    #         "prompt_chosen": chosen_prompts[i][:500],
+    #         "response_chosen": chosen_responses[i][:500],
+    #         "response_rejected": rejected_responses[i][:500],
+    #         "pre_chosen_nll": pre_chosen_stats.nlls[i],
+    #         "pre_rejected_nll": pre_rejected_stats.nlls[i],
+    #         "post_chosen_nll": post_chosen_stats.nlls[i],
+    #         "similarity_metric": similarity_metric,
+    #         "nll_diff": nll_diff,
+    #         "chosen_hidden_norm": pre_chosen_stats.hidden_sums[i].norm().item(),
+    #         "rejected_hidden_norm": pre_rejected_stats.hidden_sums[i].norm().item(),
+    #     })
 
-        results.append({
-            "idx": valid_indices[i],
-            "prompt_chosen": chosen_prompts[i][:500],
-            "response_chosen": chosen_responses[i][:500],
-            "response_rejected": rejected_responses[i][:500],
-            "pre_chosen_nll": pre_chosen_stats.nlls[i],
-            "pre_rejected_nll": pre_rejected_stats.nlls[i],
-            "post_chosen_nll": post_chosen_stats.nlls[i],
-            "similarity_metric": similarity_metric,
-            "nll_diff": nll_diff,
-            "chosen_hidden_norm": pre_chosen_stats.hidden_sums[i].norm().item(),
-            "rejected_hidden_norm": pre_rejected_stats.hidden_sums[i].norm().item(),
-        })
+    # df = pd.DataFrame(results)
 
-    df = pd.DataFrame(results)
+    # csv_path = OUTPUT_DIR / "results.csv"
+    # df.to_csv(csv_path, index=False)
+    # print(f"Results saved to {csv_path}")
 
-    csv_path = OUTPUT_DIR / "results.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Results saved to {csv_path}")
+    # # %% Phase 4: Visualization
+    # print("\n=== Phase 4: Generating plots ===")
+    # plot_correlation(df, OUTPUT_DIR)
 
-    # %% Phase 4: Visualization
-    print("\n=== Phase 4: Generating plots ===")
-    plot_correlation(df, OUTPUT_DIR)
-
-    # %% Inspect results
-    df.head(10)
+    # # %% Inspect results
+    # df.head(10)

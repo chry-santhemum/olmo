@@ -1,3 +1,6 @@
 [submodule "open-instruct"]
 	path = open-instruct
 	url = https://github.com/allenai/open-instruct/
+[submodule "persona_vectors"]
+	path = persona_vectors
+	url = https://github.com/safety-research/persona_vectors
