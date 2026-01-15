@@ -23,4 +23,5 @@ dpo_analysis/
 dpo_embedding_analysis/
 dpo_svd_analysis/
 sycophancy_eval/results/
+sycophancy_eval/datasets/
 eval_persona_extract/

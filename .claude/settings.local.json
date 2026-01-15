@@ -39,7 +39,8 @@
       "Bash(tput:*)",
       "Bash(grep:*)",
       "WebSearch",
-      "Bash(head:*)"
+      "Bash(head:*)",
+      "Bash(pip show:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
