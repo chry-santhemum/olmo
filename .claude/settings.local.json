@@ -35,5 +35,9 @@
       "Bash(kill:*)",
       "Bash(git -C /workspace/olmo log:*)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "orchestra-mcp"
+  ],
+  "enableAllProjectMcpServers": true
 }
