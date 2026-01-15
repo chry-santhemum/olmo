@@ -5,7 +5,7 @@ from pathlib import Path
 from openai import OpenAI
 
 
-def load_config(config_path: str = "config_sft.yaml") -> dict:
+def load_config(config_path: str = "vllm_configs/config_instr_sft.yaml") -> dict:
     """Load configuration from YAML file."""
     config_file = Path(__file__).parent / config_path
     with open(config_file) as f:
@@ -112,7 +112,7 @@ def interactive_chat(model: str = None, system_prompt: str = None):
         messages.append({"role": "system", "content": system_prompt})
 
     print(f"Chatting with {model}")
-    print("Type 'quit' or 'exit' to end the session.\n")
+    print("Commands: /restart (new session), /system (set system prompt), quit/exit\n")
 
     while True:
         try:
@@ -126,6 +126,40 @@ def interactive_chat(model: str = None, system_prompt: str = None):
             break
 
         if not user_input:
+            continue
+
+        if user_input.lower() == "/restart":
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            print("Session restarted.\n")
+            continue
+
+        if user_input.lower() == "/system":
+            print("Enter system prompt (empty line to finish):")
+            lines = []
+            try:
+                while True:
+                    line = input()
+                    if line == "":
+                        break
+                    lines.append(line)
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.\n")
+                continue
+            new_system = "\n".join(lines)
+            if new_system:
+                system_prompt = new_system
+                messages = [m for m in messages if m["role"] != "system"]
+                messages.insert(0, {"role": "system", "content": system_prompt})
+                print("System prompt set.\n")
+            continue
+
+        if user_input.lower().startswith("/system "):
+            system_prompt = user_input[8:]
+            messages = [m for m in messages if m["role"] != "system"]
+            messages.insert(0, {"role": "system", "content": system_prompt})
+            print("System prompt set.\n")
             continue
 
         messages.append({"role": "user", "content": user_input})
