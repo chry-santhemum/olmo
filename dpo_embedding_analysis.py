@@ -52,8 +52,8 @@ def _oom_cleanup(device: int | str | None = None):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()  # Sometimes helps reclaim CUDA IPC allocations
-        logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
-        logger.info(f"CUDA reserved memory: {torch.cuda.memory_reserved(device) / 1024**3:.2f} GB")
+        # logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
+        # logger.info(f"CUDA reserved memory: {torch.cuda.memory_reserved(device) / 1024**3:.2f} GB")
 
 def find_executable_batch_size(starting_batch_size: int, function=None):
     """Decorator that auto-reduces batch_size on OOM.
@@ -141,6 +141,8 @@ def extract_prompt_response_text(
         tokenize=False,
         add_generation_prompt=True,
     )
+    # print(prompt_text)
+    # print(response_text)
 
     return prompt_text, response_text
 
@@ -176,7 +178,10 @@ def compute_embedding_diffs(
             response_start, response_end = prompt_len, seq_len
 
             if response_end - response_start <= 0:
-                raise ValueError(f"Response length <= 0 for sample {i}; please filter your data.")
+                logger.warning(f"Response length <= 0 for sample {i} (prompt_len={prompt_len}, seq_len={seq_len}), skipping")
+                nlls.append(float('nan'))
+                activations.append(None)
+                continue
 
             # NLL
             logits = outputs.logits[i, response_start - 1 : response_end - 1]
@@ -213,8 +218,12 @@ def compute_embedding_diffs(
 
         inputs = tokenizer(full_texts, return_tensors="pt", padding=True, padding_side="right")
         input_ids = inputs["input_ids"].to(device)
+        # print(input_ids[0])
+        # print(tokenizer.decode(input_ids[0]))
         attention_mask = inputs["attention_mask"].to(device)
         prompt_lens = [len(tokenizer.encode(p, add_special_tokens=False)) for p in all_prompts]
+        # print(tokenizer.encode(all_prompts[0], add_special_tokens=False))
+        # print(tokenizer.decode(tokenizer.encode(all_prompts[0], add_special_tokens=False)))
 
         # Register hooks to capture hidden states (moved to CPU immediately in hook)
         captured_hidden: dict[int, Tensor] = {}
@@ -254,16 +263,22 @@ def compute_embedding_diffs(
                 pass
 
         # Split results: first half is chosen, second half is rejected
-        nlls_chosen = nlls[:actual_bs]
-        nlls_rejected = nlls[actual_bs:]
+        nlls_chosen_raw = nlls[:actual_bs]
+        nlls_rejected_raw = nlls[actual_bs:]
         acts_chosen = activations[:actual_bs]
         acts_rejected = activations[actual_bs:]
 
-        # Compute diffs
+        # Compute diffs, filtering out pairs where either chosen or rejected is None
         activation_diffs = []
-        for c_acts, r_acts in zip(acts_chosen, acts_rejected):
+        nlls_chosen = []
+        nlls_rejected = []
+        for c_acts, r_acts, nll_c, nll_r in zip(acts_chosen, acts_rejected, nlls_chosen_raw, nlls_rejected_raw):
+            if c_acts is None or r_acts is None:
+                continue
             diff = {layer: c_acts[layer] - r_acts[layer] for layer in layers}
             activation_diffs.append(diff)
+            nlls_chosen.append(nll_c)
+            nlls_rejected.append(nll_r)
 
         return EmbeddingDiffs(
             nlls_chosen=nlls_chosen,
@@ -599,7 +614,7 @@ def cache_embedding_diffs(
     num_samples: int,
     layers: list[int],
     batch_size: int,
-    chunk_size: int = 1000,
+    chunk_size: int,
     num_gpus: int | None = None,
     dataset_name: str = "allenai/Dolci-Instruct-DPO",
     output_dir: Path = Path("dpo_embedding_analysis"),
@@ -633,6 +648,10 @@ def cache_embedding_diffs(
     cache_dir = output_dir / f"{model_slug}-{num_samples}"
     cache_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = cache_dir / "manifest.json"
+
+    # Add file logging to the cache directory
+    log_file = cache_dir / "run.log"
+    file_logger_id = logger.add(log_file, rotation="100 MB", retention="7 days")
 
     # Load or create manifest
     manifest = _load_manifest(manifest_path)
@@ -669,6 +688,7 @@ def cache_embedding_diffs(
     # Check if all chunks complete
     if len(completed_chunks) == total_chunks:
         logger.info("All chunks already computed")
+        logger.remove(file_logger_id)
         return cache_dir
 
     # Multi-GPU path: spawn workers
@@ -704,6 +724,7 @@ def cache_embedding_diffs(
             p.join()
 
         logger.success(f"All {total_chunks} chunks saved to {cache_dir}")
+        logger.remove(file_logger_id)
         return cache_dir
 
     # Single-GPU path: process sequentially (original logic)
@@ -809,6 +830,7 @@ def cache_embedding_diffs(
     _oom_cleanup()
 
     logger.success(f"All {total_chunks} chunks saved to {cache_dir}")
+    logger.remove(file_logger_id)
     return cache_dir
 
     # # %% Phase 3: Compute metrics and build results
@@ -855,3 +877,13 @@ def cache_embedding_diffs(
 
     # # %% Inspect results
     # df.head(10)
+
+if __name__ == "__main__":
+    # debug
+    cache_embedding_diffs(
+        model_name="allenai/Olmo-3-7B-Instruct-SFT",
+        num_samples=4,
+        layers=[12],
+        batch_size=1,
+        chunk_size=1000,
+    )

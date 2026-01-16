@@ -20,6 +20,9 @@ trash/
 petri-results/
 petri-repeat-results/
 dpo_analysis/
+dpo_filter_data/
+dpo_checkpoints/
+dpo_filter_sweep_logs/
 dpo_embedding_analysis/
 dpo_svd_analysis/
 sycophancy_eval/results/

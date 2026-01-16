@@ -40,7 +40,12 @@
       "Bash(grep:*)",
       "WebSearch",
       "Bash(head:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(OPENAI_API_KEY=dummy python:*)",
+      "Bash(OPENAI_API_KEY=dummy HF_TOKEN=dummy python:*)",
+      "Bash(uv add:*)",
+      "Bash(uv run python:*)",
+      "Bash(bash -n:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
@@ -54,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done"
+            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done; true"
           }
         ]
       }
@@ -65,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done"
+            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done; true"
           }
         ]
       }
