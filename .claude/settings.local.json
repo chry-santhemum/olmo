@@ -45,7 +45,13 @@
       "Bash(OPENAI_API_KEY=dummy HF_TOKEN=dummy python:*)",
       "Bash(uv add:*)",
       "Bash(uv run python:*)",
-      "Bash(bash -n:*)"
+      "Bash(bash -n:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(./run_dpo_evals.sh:*)",
+      "Bash(export PYTHONPATH=/workspace/olmo:$PYTHONPATH:*)",
+      "Bash(vllm serve --help:*)",
+      "Bash(unzip:*)",
+      "Bash(find:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
