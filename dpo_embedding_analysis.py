@@ -17,6 +17,7 @@ import scipy.stats
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+from torch.profiler import profile, ProfilerActivity, schedule
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -363,43 +364,57 @@ def _gpu_worker(
 
             save_manifest(manifest_path, manifest)
 
-    chunks_processed = 0
-    while True:
-        chunk_idx = _claim_next_chunk(cache_dir, lock)
-        if chunk_idx is None:
-            logger.info(f"[Device {device}] No more chunks to process")
-            break
+    profile_dir = cache_dir / "profiles"
+    profile_dir.mkdir(exist_ok=True)
 
-        start_idx = chunk_idx * chunk_size
-        end_idx = min(start_idx + chunk_size, num_samples)
-        logger.info(f"[Device {device}] Processing chunk {chunk_idx} ({start_idx} to {end_idx})")
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=schedule(wait=0, warmup=1, active=2, repeat=1),  # Profile chunks 2-3
+        on_trace_ready=lambda p: p.export_chrome_trace(
+            str(profile_dir / f"trace_device_{device.index}.json")
+        ),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as prof:
+        chunks_processed = 0
+        while True:
+            chunk_idx = _claim_next_chunk(cache_dir, lock)
+            if chunk_idx is None:
+                logger.info(f"[Device {device}] No more chunks to process")
+                break
 
-        chosen_chats = dataset["chosen"][start_idx:end_idx]
-        rejected_chats = dataset["rejected"][start_idx:end_idx]
+            start_idx = chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, num_samples)
+            logger.info(f"[Device {device}] Processing chunk {chunk_idx} ({start_idx} to {end_idx})")
 
-        activation_diffs = compute_embedding_diffs(
-            model,
-            tokenizer,
-            chosen_chats=chosen_chats,
-            rejected_chats=rejected_chats,
-            layers=layers,
-            batch_size=batch_size,
-        )
+            chosen_chats = dataset["chosen"][start_idx:end_idx]
+            rejected_chats = dataset["rejected"][start_idx:end_idx]
 
-        chunk_data = {
-            "chunk_idx": chunk_idx,
-            "start_idx": start_idx,
-            "end_idx": end_idx,
-            "activation_diffs": activation_diffs,
-            "chosen_chats": chosen_chats,
-            "rejected_chats": rejected_chats,
-        }
-        manifest = load_manifest(cache_dir / "manifest.json")
-        chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
-        save_chunk(chunk_path, chunk_data)
-        _mark_chunk_complete(cache_dir, lock, chunk_idx)
-        chunks_processed += 1
-        logger.info(f"[Device {device}] Completed chunk {chunk_idx}")
+            activation_diffs = compute_embedding_diffs(
+                model,
+                tokenizer,
+                chosen_chats=chosen_chats,
+                rejected_chats=rejected_chats,
+                layers=layers,
+                batch_size=batch_size,
+            )
+
+            chunk_data = {
+                "chunk_idx": chunk_idx,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "activation_diffs": activation_diffs,
+                "chosen_chats": chosen_chats,
+                "rejected_chats": rejected_chats,
+            }
+            manifest = load_manifest(cache_dir / "manifest.json")
+            chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
+            save_chunk(chunk_path, chunk_data)
+            _mark_chunk_complete(cache_dir, lock, chunk_idx)
+            chunks_processed += 1
+            logger.info(f"[Device {device}] Completed chunk {chunk_idx}")
+            prof.step()  # Signal profiler that iteration is complete
 
     del model, activation_diffs
     _oom_cleanup(device)
