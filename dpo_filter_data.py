@@ -289,15 +289,15 @@ if __name__ == "__main__":
     model_slug = model_name.split("/")[-1]
     trait = "sycophantic"
     LAYER = 23
-    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER]
+    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
     feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
 
     main(
         model_name=model_name,
         vector=persona_vector,
         layer=LAYER,
-        num_samples=1024,
-        chunk_size=256,
+        num_samples=512,
+        chunk_size=128,
         top_pct=5.0,
         action="prune",
         save_dir="dpo_filter_data/debug",

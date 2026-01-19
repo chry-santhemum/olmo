@@ -47,7 +47,6 @@ for DATASET in "${DATASETS[@]}"; do
         --use_deepspeed \
         --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
         open_instruct/dpo_tune_cache.py \
-        configs/train_configs/olmo3/olmo3_7b_instruct_dpo_filtered.yaml \
         --dataset_mixer_list="${DATASET},1.0" \
         --output_dir="$OUTPUT_DIR" \
         --exp_name="dpo_filter_${NAME}" \
