@@ -87,6 +87,8 @@
 
 - [2025-01-04] Run all `uv` project commands with `--active` flag (e.g., `uv add --active --editable pkg_name` for adding a python package in editable mode, or `uv sync --active` for syncing dependencies).
 
+- [2026-01-19] NEVER create a .venv inside any project directory. Always use ~/.venv as the single shared venv. If dependencies change, run `uv sync --active` to update ~/.venv.
+
 
 
 # PROJECT-SPECIFIC GUIDELINES

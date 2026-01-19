@@ -6,7 +6,8 @@ DATASET="${1:?Usage: $0 <dataset_path> [output_dir]}"
 [[ -f "$DATASET" ]] && DATASET="$(realpath "$DATASET")"
 
 cd /workspace/olmo/open-instruct
-source .venv/bin/activate
+source ~/.venv/bin/activate
+uv sync --active
 OUTPUT_DIR="${2:-/workspace/olmo/dpo_train_profile}"
 
 accelerate launch \
@@ -22,4 +23,5 @@ accelerate launch \
     --profile_steps=10 \
     --with_tracking=false \
     --try_launch_beaker_eval_jobs=false \
-    --do_not_randomize_output_dir=true
+    --do_not_randomize_output_dir=true \
+    --max_train_steps=8

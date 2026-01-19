@@ -198,7 +198,6 @@ def compute_embedding_diffs(
             return_tensors="pt",
             add_generation_prompt=True
         ).shape[-1] for i in range(len(all_chats))]
-        # Tokenize just the response content (no special tokens) to get accurate length
         response_lengths = [len(tokenizer(all_chats[i][-1]["content"], add_special_tokens=False)["input_ids"])
                            for i in range(len(all_chats))]
         response_ends = [response_starts[i] + response_lengths[i] for i in range(len(all_chats))]
@@ -214,17 +213,6 @@ def compute_embedding_diffs(
                 logger.error(f"Response end {response_ends[i]} exceeds sequence length {seq_lengths[i]}")
                 logger.error(f"Chat messages: {all_chats[i]}")
                 raise ValueError(f"Response end {response_ends[i]} exceeds sequence length {seq_lengths[i]}")
-
-        # # debug
-        # print("Input ids:", inputs["input_ids"][0])
-        # print("Input tokens:", tokenizer.decode(inputs["input_ids"][0]))
-
-        # print("Prompt ids:", tokenizer.apply_chat_template(
-        #     all_chats[0][:-1], 
-        #     tokenize=True,
-        #     return_tensors="pt",
-        #     add_generation_prompt=True
-        # ))
 
         # Register hooks to capture hidden states
         captured_hidden: dict[int, Tensor] = {}
@@ -242,7 +230,7 @@ def compute_embedding_diffs(
                 try:
                     model(**inputs)
                 except EarlyExitException:
-                    pass  # Expected - we got all activations we need
+                    pass
             activations = []
             for i in range(len(all_chats)):
                 item_acts = {}
@@ -262,12 +250,23 @@ def compute_embedding_diffs(
         for i in range(actual_bs):
             c_acts = acts_chosen[i]
             r_acts = acts_rejected[i]
-            chosen_response = all_chats[i][-1]["content"]
-            rejected_response = all_chats[i+actual_bs][-1]["content"]
+            chosen_idx, rejected_idx = i, i + actual_bs
+            chosen_response = all_chats[chosen_idx][-1]["content"]
+            rejected_response = all_chats[rejected_idx][-1]["content"]
             diff = {layer: c_acts[layer] - r_acts[layer] for layer in layers}
 
             if chosen_response == rejected_response:
-                logger.info(f"Chosen and rejected responses matched. Diff norm: {"\n".join([f"{layer}: {diff[layer].norm():.4f}" for layer in layers])}")
+                c_start, c_end = response_starts[chosen_idx], response_ends[chosen_idx]
+                r_start, r_end = response_starts[rejected_idx], response_ends[rejected_idx]
+                # Compare FULL sequences, not just response tokens
+                c_full = inputs["input_ids"][chosen_idx, :c_end].tolist()
+                r_full = inputs["input_ids"][rejected_idx, :r_end].tolist()
+                full_match = c_full == r_full
+                logger.info(
+                    f"Identical responses: diff_norm={diff[layers[0]].norm():.4f}, "
+                    f"spans=({c_start}:{c_end}) vs ({r_start}:{r_end}), "
+                    f"full_seq_match={full_match}, len={len(c_full)} vs {len(r_full)}"
+                )
             activation_diffs.append(diff)
 
         return activation_diffs, end_pos
