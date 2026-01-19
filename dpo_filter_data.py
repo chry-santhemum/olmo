@@ -9,9 +9,19 @@ from loguru import logger
 from torch import Tensor
 from tqdm import tqdm
 
-from dpo_embedding_analysis import cache_embedding_diffs_multi, load_chunk, load_manifest
+from dpo_embedding_analysis import cache_embedding_diffs_multi, load_manifest
 from persona_vectors.eval.eval_persona import main as eval_persona_main
 from persona_vectors.generate_vec import save_persona_vector
+
+
+def load_chunk(cache_dir: Path, chunk_idx: int) -> dict:
+    """Load a single chunk from the cache directory."""
+    manifest = load_manifest(cache_dir / "manifest.json")
+    assert manifest is not None, "Manifest not found"
+    chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
+    if not chunk_path.exists():
+        raise FileNotFoundError(f"Chunk {chunk_idx} not found at {chunk_path}")
+    return torch.load(chunk_path)
 
 
 def filter_dataset(
@@ -29,17 +39,6 @@ def filter_dataset(
     Compute dot product between (chosen - rejected) activation diff and persona vector,
     then filter or flip samples based on similarity.
 
-    Args:
-        cache_dir: Directory containing cached embedding diffs
-        save_dir: Directory to save the filtered HuggingFace Dataset
-        vector: Persona vector to compare against
-        layer: Model layer to use for activation diffs
-        top_pct: Select top X% most similar samples (mutually exclusive with bottom_pct)
-        bottom_pct: Select bottom X% least similar samples (mutually exclusive with top_pct)
-        action: "prune" removes selected samples, "flip" swaps their chosen/rejected
-        print_percentiles: Percentile boundaries for printing example distribution
-        print_num_examples: Number of examples to print per percentile bucket
-
     Returns:
         HuggingFace Dataset with 'chosen' and 'rejected' columns, saved to save_dir
     """
@@ -47,48 +46,29 @@ def filter_dataset(
         raise ValueError("top_pct and bottom_pct are mutually exclusive")
 
     if print_percentiles is None:
-        print_percentiles = [0, 10, 25, 50, 75, 90, 100]
+        print_percentiles = [0, 2, 5, 10, 20, 80, 90, 95, 98, 100]
 
     manifest = load_manifest(cache_dir / "manifest.json")
     assert manifest is not None, "Manifest not found"
     total_chunks = manifest["total_chunks"]
 
-    # Check layer availability in first chunk
-    first_chunk = load_chunk(cache_dir, 0)
-    if layer not in first_chunk["activation_diffs"][0]:
-        available_layers = list(first_chunk["activation_diffs"][0].keys())
-        raise ValueError(f"Layer {layer} not in cache. Available layers: {available_layers}")
-    del first_chunk
-
-    # Normalize persona vector
-    print(f"Original vector norm: {vector.norm()}")
-    vector = vector / vector.norm()
-
     # Stream chunks and compute dot products (only completed chunks)
     completed_chunks = sorted(manifest["completed_chunks"])
-    dot_prods = {}  # global_idx -> dot_prod
+    dot_prods: dict[tuple[int, int], float] = {}
     logger.info(f"Computing dot products across {len(completed_chunks)}/{total_chunks} completed chunks...")
 
     for chunk_idx in tqdm(completed_chunks, desc="Processing chunks"):
         chunk = load_chunk(cache_dir, chunk_idx)
-        start_idx = chunk["start_idx"]
         for local_idx, sample_diffs in enumerate(chunk["activation_diffs"]):
-            global_idx = start_idx + local_idx
             if layer not in sample_diffs:
                 raise ValueError(f"Layer {layer} not in sample_diffs")
-            diff = sample_diffs[layer]
-            diff = diff.to(vector.dtype)
+            diff = sample_diffs[layer].to(vector.dtype)
             sim = torch.dot(diff, vector).item()
-            dot_prods[global_idx] = sim
-        del chunk
+            dot_prods[(chunk_idx, local_idx)] = sim
 
     # Print distribution stats
     n_available = len(dot_prods)
     dot_prods_arr = np.array(list(dot_prods.values()))
-    logger.info(f"Layer {layer} dot product stats ({n_available} samples):")
-    logger.info(f"  min={dot_prods_arr.min():.4f}, max={dot_prods_arr.max():.4f}")
-    logger.info(f"  mean={dot_prods_arr.mean():.4f}, std={dot_prods_arr.std():.4f}")
-    logger.info(f"  median={np.median(dot_prods_arr):.4f}")
 
     # Determine which samples are selected based on top_pct or bottom_pct
     selected_indices: set[int] = set()
@@ -153,23 +133,20 @@ def filter_dataset(
     logger.info(f"Building filtered dataset from {len(completed_chunks)} chunks...")
     for chunk_idx in tqdm(completed_chunks, desc="Collecting samples"):
         chunk = load_chunk(cache_dir, chunk_idx)
-        start_idx = chunk["start_idx"]
         for local_idx, chosen_chat in enumerate(chunk["chosen_chats"]):
-            global_idx = start_idx + local_idx
-            if global_idx not in kept_set:
+            if (chunk_idx, local_idx) not in kept_set:
                 continue
 
             rejected_chat = chunk["rejected_chats"][local_idx]
 
             # Apply flip if needed
-            if global_idx in flip_indices:
+            if (chunk_idx, local_idx) in flip_indices:
                 chosen_list.append(rejected_chat)
                 rejected_list.append(chosen_chat)
                 n_flipped += 1
             else:
                 chosen_list.append(chosen_chat)
                 rejected_list.append(rejected_chat)
-        del chunk
 
     # Save dataset as JSON
     dataset_dict = {"chosen": chosen_list, "rejected": rejected_list}
@@ -181,19 +158,18 @@ def filter_dataset(
     return dataset_dict
 
 
-def _get_example_from_cache(cache_dir: Path, global_idx: int, dot_prod: float) -> dict:
+def _get_example_from_cache(cache_dir: Path, idx: tuple[int, int], dot_prod: float) -> dict:
     """Load a single example from the appropriate chunk."""
     manifest = load_manifest(cache_dir / "manifest.json")
     assert manifest is not None, "Manifest not found"
-    chunk_size = manifest["chunk_size"]
-    chunk_idx = global_idx // chunk_size
-    local_idx = global_idx % chunk_size
+    chunk_idx, local_idx = idx
 
     chunk = load_chunk(cache_dir, chunk_idx)
     chosen_chat = chunk["chosen_chats"][local_idx]
     rejected_chat = chunk["rejected_chats"][local_idx]
     return {
-        "global_idx": global_idx,
+        "chunk_idx": chunk_idx,
+        "local_idx": local_idx,
         "dot_prod": dot_prod,
         "chosen_prompt": chosen_chat[0]["content"],
         "rejected_prompt": rejected_chat[0]["content"],

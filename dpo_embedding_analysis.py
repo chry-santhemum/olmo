@@ -4,20 +4,15 @@ import gc
 import inspect
 import json
 import multiprocessing as mp
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from loguru import logger
 from tqdm import tqdm
 from datasets import load_dataset, Dataset
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import scipy.stats
 import torch
 from torch import Tensor, nn
-import torch.nn.functional as F
 from torch.profiler import profile, ProfilerActivity, schedule
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -59,17 +54,17 @@ class EarlyExitException(Exception):
     pass
 
 
-def _make_record_mean_hook(layer_idx: int, starts: list[int], ends: list[int], captured: dict, max_layer: int | None = None):
+def _make_record_mean_hook(layer_idx: int, slices: list[slice], captured: dict[int, list[Tensor]], early_exit: bool=True):
     """Record mean of hidden states between `starts` and `ends` for each sample."""
     def hook(module, input, output):
         hidden = output[0] if isinstance(output, tuple) else output
-        batch_size, seq_len, _ = hidden.shape
-        assert len(starts) == len(ends) == batch_size, f"Starts ({len(starts)}), ends ({len(ends)}), and batch size ({batch_size}) must have the same length"
+        batch_size = hidden.shape[0]
+        assert len(slices) == batch_size, f"Slices ({len(slices)}) and batch size ({batch_size}) must have the same length"
 
-        means = [hidden[i, starts[i]:ends[i], :].mean(dim=0) for i in range(batch_size)]
+        means = [hidden[i, slices[i], :].mean(dim=0) for i in range(batch_size)]
         captured[layer_idx] = means
 
-        if max_layer is not None and layer_idx >= max_layer:
+        if early_exit:
             raise EarlyExitException()
     return hook
 
@@ -192,81 +187,57 @@ def compute_embedding_diffs(
         )
         inputs = {k: v.to(device, non_blocking=True) for k, v in inputs.items()}
 
-        response_starts = [tokenizer.apply_chat_template(
-            all_chats[i][:-1],
-            tokenize=True,
-            return_tensors="pt",
-            add_generation_prompt=True
-        ).shape[-1] for i in range(len(all_chats))]
-        response_lengths = [len(tokenizer(all_chats[i][-1]["content"], add_special_tokens=False)["input_ids"])
-                           for i in range(len(all_chats))]
-        response_ends = [response_starts[i] + response_lengths[i] for i in range(len(all_chats))]
+        response_starts = [
+            tokenizer.apply_chat_template(
+                chat[:-1],
+                tokenize=True,
+                return_tensors="pt",
+                add_generation_prompt=True
+            ).shape[-1] 
+            for chat in all_chats
+        ]
+        response_lengths = [
+            len(tokenizer(chat[-1]["content"], add_special_tokens=False)["input_ids"])
+            for chat in all_chats
+        ]
 
-        torch.cuda.synchronize()
-        seq_lengths = [inputs["attention_mask"][i].sum().item() for i in range(len(all_chats))]
         for i in range(len(all_chats)):
-            if response_ends[i] - response_starts[i] <= 0:
-                logger.error(f"Response length <= 0 (prompt_len={response_starts[i]}, seq_len={response_ends[i]}):")
+            if response_lengths[i] <= 0:
+                logger.error(f"Response length = {response_lengths[i]} <= 0.")
                 logger.error(f"Chat messages: {all_chats[i]}")
-                raise ValueError(f"Response length <= 0 (prompt_len={response_starts[i]}, seq_len={response_ends[i]})")
-            if response_ends[i] > seq_lengths[i]:
-                logger.error(f"Response end {response_ends[i]} exceeds sequence length {seq_lengths[i]}")
-                logger.error(f"Chat messages: {all_chats[i]}")
-                raise ValueError(f"Response end {response_ends[i]} exceeds sequence length {seq_lengths[i]}")
-
+                raise ValueError(f"Response length = {response_lengths[i]} <= 0.")
+                
         # Register hooks to capture hidden states
-        captured_hidden: dict[int, Tensor] = {}
+        captured_hidden: dict[int, list[Tensor]] = {}
         handles = []
-        max_layer = max(layers)
         for layer_idx in layers:
             module = get_module(model, get_resid_block_name(model, layer_idx))
             handle = module.register_forward_hook(_make_record_mean_hook(
-                layer_idx, response_starts, response_ends, captured_hidden, max_layer
+                layer_idx, 
+                [slice(response_starts[i], response_starts[i] + response_lengths[i]) for i in range(len(all_chats))], 
+                captured_hidden, 
+                early_exit=(layer_idx == max(layers)),
             ))
             handles.append(handle)
 
+        # Forward pass
         try:
             with torch.no_grad():
                 try:
                     model(**inputs)
                 except EarlyExitException:
                     pass
-            activations = []
-            for i in range(len(all_chats)):
-                item_acts = {}
-                for layer_idx in layers:
-                    item_acts[layer_idx] = captured_hidden[layer_idx][i].to("cpu", non_blocking=True)
-                activations.append(item_acts)
-
         finally:
             for handle in handles:
                 handle.remove()
 
-        # Split results: first half is chosen, second half is rejected
-        acts_chosen = activations[:actual_bs]
-        acts_rejected = activations[actual_bs:]
-
         activation_diffs = []
         for i in range(actual_bs):
-            c_acts = acts_chosen[i]
-            r_acts = acts_rejected[i]
-            chosen_idx, rejected_idx = i, i + actual_bs
-            chosen_response = all_chats[chosen_idx][-1]["content"]
-            rejected_response = all_chats[rejected_idx][-1]["content"]
-            diff = {layer: c_acts[layer] - r_acts[layer] for layer in layers}
-
-            if chosen_response == rejected_response:
-                c_start, c_end = response_starts[chosen_idx], response_ends[chosen_idx]
-                r_start, r_end = response_starts[rejected_idx], response_ends[rejected_idx]
-                # Compare FULL sequences, not just response tokens
-                c_full = inputs["input_ids"][chosen_idx, :c_end].tolist()
-                r_full = inputs["input_ids"][rejected_idx, :r_end].tolist()
-                full_match = c_full == r_full
-                logger.info(
-                    f"Identical responses: diff_norm={diff[layers[0]].norm():.4f}, "
-                    f"spans=({c_start}:{c_end}) vs ({r_start}:{r_end}), "
-                    f"full_seq_match={full_match}, len={len(c_full)} vs {len(r_full)}"
-                )
+            diff = {}
+            for layer_idx in layers:
+                chosen_acts = captured_hidden[layer_idx][i]
+                rejected_acts = captured_hidden[layer_idx][i + actual_bs]
+                diff[layer_idx] = chosen_acts - rejected_acts
             activation_diffs.append(diff)
 
         return activation_diffs, end_pos
@@ -300,21 +271,6 @@ def save_manifest(path: Path, manifest: dict) -> None:
     with open(tmp_path, "w") as f:
         json.dump(manifest, f, indent=2)
     tmp_path.rename(path)
-
-def save_chunk(path: Path, chunk_data: dict) -> None:
-    """Atomic save."""
-    tmp_path = path.with_suffix(".tmp")
-    torch.save(chunk_data, tmp_path)
-    tmp_path.rename(path)
-
-def load_chunk(cache_dir: Path, chunk_idx: int) -> dict:
-    """Load a single chunk from the cache directory."""
-    manifest = load_manifest(cache_dir / "manifest.json")
-    assert manifest is not None, "Manifest not found"
-    chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
-    if not chunk_path.exists():
-        raise FileNotFoundError(f"Chunk {chunk_idx} not found at {chunk_path}")
-    return torch.load(chunk_path)
 
 
 def _gpu_worker(
@@ -423,6 +379,7 @@ def _gpu_worker(
                 batch_size=batch_size,
             )
 
+            # save chunk
             chunk_data = {
                 "chunk_idx": chunk_idx,
                 "start_idx": start_idx,
@@ -432,7 +389,9 @@ def _gpu_worker(
                 "rejected_chats": rejected_chats,
             }
             chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
-            save_chunk(chunk_path, chunk_data)
+            tmp_path = chunk_path.with_suffix(".tmp")
+            torch.save(chunk_data, tmp_path)
+            tmp_path.rename(chunk_path)
             _mark_chunk_complete(cache_dir, lock, chunk_idx)
             chunks_processed += 1
             logger.info(f"[Device {device}] Completed chunk {chunk_idx}")
