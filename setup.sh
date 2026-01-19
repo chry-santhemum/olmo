@@ -6,7 +6,6 @@ cd /workspace/olmo
 uv sync --active
 uv add --active "huggingface_hub" "wandb"
 
-source .env
 export HF_HOME="/root/hf"
 export HF_HUB_ENABLE_HF_TRANSFER=0
 hf auth login --token $RUNPOD_HF_TOKEN --add-to-git-credential

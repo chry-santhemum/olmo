@@ -57,7 +57,9 @@
       "Bash(inspect score:*)",
       "Bash(for bias in positive_bias negative_bias ownership_bias disownership)",
       "Bash(do echo -n \"$bias: \")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(make style:*)",
+      "Bash(make quality:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

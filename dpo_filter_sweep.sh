@@ -2,50 +2,30 @@
 set -euo pipefail
 
 cd /workspace/olmo
+source .env
 source setup.sh
 
 # Filter data with different prune percentages
-python3 dpo_filter_data.py \
-    allenai/Olmo-3-7B-Instruct-SFT \
-    sycophantic \
-    --num_samples 32768 \
-    --chunk_size 256 \
-    --prune_top_pct 5.0 \
-    --output_dataset_path dpo_filter_data/33K-5pct.jsonl
-
-python3 dpo_filter_data.py \
-    allenai/Olmo-3-7B-Instruct-SFT \
-    sycophantic \
-    --num_samples 32768 \
-    --chunk_size 256 \
-    --prune_top_pct 1.0 \
-    --output_dataset_path dpo_filter_data/33K-1pct.jsonl
-
-python3 dpo_filter_data.py \
-    allenai/Olmo-3-7B-Instruct-SFT \
-    sycophantic \
-    --num_samples 32768 \
-    --chunk_size 256 \
-    --prune_top_pct 0.25 \
-    --output_dataset_path dpo_filter_data/33K-0.25pct.jsonl
-
-
+python3 dpo_filter_data.py
 
 # train
-# cd /workspace/olmo/open-instruct
-# source .venv/bin/activate
-# wandb login
-# hf auth login
+cd /workspace/olmo/open-instruct
+source .venv/bin/activate
+uv sync --active
 
 DATASETS=(
-    "/workspace/olmo/dpo_filter_data/33K-5pct.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-1pct.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-0.25pct.jsonl"
+    "/workspace/olmo/dpo_filter_data/33K-persona-5.0pct-prune/dataset.json"
+    "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-prune/dataset.json"
+    "/workspace/olmo/dpo_filter_data/33K-persona-0.25pct-prune/dataset.json"
+    "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-flip/dataset.json"
+    "/workspace/olmo/dpo_filter_data/33K-persona-0.25pct-flip/dataset.json"
+    "/workspace/olmo/dpo_filter_data/33K-feedback-1.0pct-flip/dataset.json"
+    "/workspace/olmo/dpo_filter_data/33K-feedback-0.25pct-flip/dataset.json"
 )
 
 for DATASET in "${DATASETS[@]}"; do
     # Extract name for output dir (e.g., "33K-5pct" from path)
-    NAME=$(basename "$DATASET" .jsonl)
+    NAME=$(basename "$DATASET" .json)
     OUTPUT_DIR="/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_${NAME}"
 
     LOG_FILE="/workspace/olmo/dpo_filter_sweep_logs/${NAME}.log"

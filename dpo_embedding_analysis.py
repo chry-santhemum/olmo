@@ -1,4 +1,5 @@
 # %% Imports and Configuration
+import contextlib
 import gc
 import inspect
 import json
@@ -197,14 +198,22 @@ def compute_embedding_diffs(
             return_tensors="pt",
             add_generation_prompt=True
         ).shape[-1] for i in range(len(all_chats))]
-        response_ends = [inputs["attention_mask"][i].sum().item() for i in range(len(all_chats))]
+        # Tokenize just the response content (no special tokens) to get accurate length
+        response_lengths = [len(tokenizer(all_chats[i][-1]["content"], add_special_tokens=False)["input_ids"])
+                           for i in range(len(all_chats))]
+        response_ends = [response_starts[i] + response_lengths[i] for i in range(len(all_chats))]
 
         torch.cuda.synchronize()
+        seq_lengths = [inputs["attention_mask"][i].sum().item() for i in range(len(all_chats))]
         for i in range(len(all_chats)):
             if response_ends[i] - response_starts[i] <= 0:
                 logger.error(f"Response length <= 0 (prompt_len={response_starts[i]}, seq_len={response_ends[i]}):")
                 logger.error(f"Chat messages: {all_chats[i]}")
                 raise ValueError(f"Response length <= 0 (prompt_len={response_starts[i]}, seq_len={response_ends[i]})")
+            if response_ends[i] > seq_lengths[i]:
+                logger.error(f"Response end {response_ends[i]} exceeds sequence length {seq_lengths[i]}")
+                logger.error(f"Chat messages: {all_chats[i]}")
+                raise ValueError(f"Response end {response_ends[i]} exceeds sequence length {seq_lengths[i]}")
 
         # # debug
         # print("Input ids:", inputs["input_ids"][0])
@@ -250,10 +259,15 @@ def compute_embedding_diffs(
         acts_rejected = activations[actual_bs:]
 
         activation_diffs = []
-        for c_acts, r_acts in zip(acts_chosen, acts_rejected, strict=True):
-            if c_acts is None or r_acts is None:
-                continue
+        for i in range(actual_bs):
+            c_acts = acts_chosen[i]
+            r_acts = acts_rejected[i]
+            chosen_response = all_chats[i][-1]["content"]
+            rejected_response = all_chats[i+actual_bs][-1]["content"]
             diff = {layer: c_acts[layer] - r_acts[layer] for layer in layers}
+
+            if chosen_response == rejected_response:
+                logger.info(f"Chosen and rejected responses matched. Diff norm: {"\n".join([f"{layer}: {diff[layer].norm():.4f}" for layer in layers])}")
             activation_diffs.append(diff)
 
         return activation_diffs, end_pos
@@ -313,6 +327,7 @@ def _gpu_worker(
     chunk_size: int,
     cache_dir: Path,
     lock,
+    enable_profiling: bool = False,
 ) -> None:
     """Worker function that processes chunks on a specific GPU."""
     num_samples = len(dataset)
@@ -369,19 +384,23 @@ def _gpu_worker(
 
             save_manifest(manifest_path, manifest)
 
-    profile_dir = cache_dir / "profiles"
-    profile_dir.mkdir(exist_ok=True)
+    if enable_profiling:
+        profile_dir = cache_dir / "profiles"
+        profile_dir.mkdir(exist_ok=True)
+        profiler_ctx = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=schedule(wait=0, warmup=1, active=2, repeat=1),  # Profile chunks 2-3
+            on_trace_ready=lambda p: p.export_chrome_trace(
+                str(profile_dir / f"trace_device_{device.index}.json")
+            ),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+    else:
+        profiler_ctx = contextlib.nullcontext()
 
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        schedule=schedule(wait=0, warmup=1, active=2, repeat=1),  # Profile chunks 2-3
-        on_trace_ready=lambda p: p.export_chrome_trace(
-            str(profile_dir / f"trace_device_{device.index}.json")
-        ),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-    ) as prof:
+    with profiler_ctx as prof:
         chunks_processed = 0
         while True:
             chunk_idx = _claim_next_chunk(cache_dir, lock)
@@ -418,7 +437,8 @@ def _gpu_worker(
             _mark_chunk_complete(cache_dir, lock, chunk_idx)
             chunks_processed += 1
             logger.info(f"[Device {device}] Completed chunk {chunk_idx}")
-            prof.step()  # Signal profiler that iteration is complete
+            if prof is not None:
+                prof.step()
 
     logger.info(f"[Device {device}] Worker finished, processed {chunks_processed} chunks")
 
@@ -432,6 +452,7 @@ def cache_embedding_diffs_multi(
     chunk_size: int,
     devices: list[torch.device] | None = None,
     output_dir: Path = Path("dpo_embedding_analysis"),
+    enable_profiling: bool = False,
 ) -> Path:
     """Cache DPO embedding diffs in chunks.
 
@@ -525,6 +546,7 @@ def cache_embedding_diffs_multi(
                 chunk_size,
                 cache_dir,
                 lock,
+                enable_profiling,
             ),
         )
         p.start()
@@ -578,5 +600,6 @@ if __name__ == "__main__":
         batch_size=8,
         chunk_size=32,
         output_dir=Path("dpo_embedding_analysis"),
+        enable_profiling=True,
     )
 

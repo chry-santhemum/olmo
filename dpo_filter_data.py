@@ -1,14 +1,13 @@
+import json
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from datasets import Dataset, load_dataset
+from datasets import load_dataset
 from loguru import logger
 from torch import Tensor
 from tqdm import tqdm
-from transformers import AutoConfig
 
 from dpo_embedding_analysis import cache_embedding_diffs_multi, load_chunk, load_manifest
 from persona_vectors.eval.eval_persona import main as eval_persona_main
@@ -23,11 +22,11 @@ def filter_dataset(
     top_pct: float | None = None,
     bottom_pct: float | None = None,
     action: Literal["prune", "flip"] = "prune",
-    print_thresholds: list[float] | None = None,
+    print_percentiles: list[float] | None = None,
     print_num_examples: int = 10,
-) -> Dataset:
+) -> dict:
     """
-    Compute cosine similarity between (chosen - rejected) activation diff and persona vector,
+    Compute dot product between (chosen - rejected) activation diff and persona vector,
     then filter or flip samples based on similarity.
 
     Args:
@@ -38,8 +37,8 @@ def filter_dataset(
         top_pct: Select top X% most similar samples (mutually exclusive with bottom_pct)
         bottom_pct: Select bottom X% least similar samples (mutually exclusive with top_pct)
         action: "prune" removes selected samples, "flip" swaps their chosen/rejected
-        print_thresholds: Bucket boundaries for printing example distribution
-        print_num_examples: Number of examples to print per bucket
+        print_percentiles: Percentile boundaries for printing example distribution
+        print_num_examples: Number of examples to print per percentile bucket
 
     Returns:
         HuggingFace Dataset with 'chosen' and 'rejected' columns, saved to save_dir
@@ -47,10 +46,10 @@ def filter_dataset(
     if top_pct is not None and bottom_pct is not None:
         raise ValueError("top_pct and bottom_pct are mutually exclusive")
 
-    if print_thresholds is None:
-        print_thresholds = [-1.0, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.25, 1.0]
+    if print_percentiles is None:
+        print_percentiles = [0, 10, 25, 50, 75, 90, 100]
 
-    manifest = load_manifest(cache_dir)
+    manifest = load_manifest(cache_dir / "manifest.json")
     assert manifest is not None, "Manifest not found"
     total_chunks = manifest["total_chunks"]
 
@@ -61,10 +60,14 @@ def filter_dataset(
         raise ValueError(f"Layer {layer} not in cache. Available layers: {available_layers}")
     del first_chunk
 
-    # Stream chunks and compute cosine similarities (only completed chunks)
+    # Normalize persona vector
+    print(f"Original vector norm: {vector.norm()}")
+    vector = vector / vector.norm()
+
+    # Stream chunks and compute dot products (only completed chunks)
     completed_chunks = sorted(manifest["completed_chunks"])
-    cos_sims = {}  # global_idx -> cos_sim
-    logger.info(f"Computing cosine similarities across {len(completed_chunks)}/{total_chunks} completed chunks...")
+    dot_prods = {}  # global_idx -> dot_prod
+    logger.info(f"Computing dot products across {len(completed_chunks)}/{total_chunks} completed chunks...")
 
     for chunk_idx in tqdm(completed_chunks, desc="Processing chunks"):
         chunk = load_chunk(cache_dir, chunk_idx)
@@ -74,56 +77,72 @@ def filter_dataset(
             if layer not in sample_diffs:
                 raise ValueError(f"Layer {layer} not in sample_diffs")
             diff = sample_diffs[layer]
-            sim = F.cosine_similarity(diff.unsqueeze(0), vector.unsqueeze(0)).item()
-            cos_sims[global_idx] = sim
+            diff = diff.to(vector.dtype)
+            sim = torch.dot(diff, vector).item()
+            dot_prods[global_idx] = sim
         del chunk
 
     # Print distribution stats
-    n_available = len(cos_sims)
-    cos_sims_arr = np.array(list(cos_sims.values()))
-    logger.info(f"Layer {layer} cosine similarity stats ({n_available} samples):")
-    logger.info(f"  min={cos_sims_arr.min():.4f}, max={cos_sims_arr.max():.4f}")
-    logger.info(f"  mean={cos_sims_arr.mean():.4f}, std={cos_sims_arr.std():.4f}")
-    logger.info(f"  median={np.median(cos_sims_arr):.4f}")
+    n_available = len(dot_prods)
+    dot_prods_arr = np.array(list(dot_prods.values()))
+    logger.info(f"Layer {layer} dot product stats ({n_available} samples):")
+    logger.info(f"  min={dot_prods_arr.min():.4f}, max={dot_prods_arr.max():.4f}")
+    logger.info(f"  mean={dot_prods_arr.mean():.4f}, std={dot_prods_arr.std():.4f}")
+    logger.info(f"  median={np.median(dot_prods_arr):.4f}")
 
     # Determine which samples are selected based on top_pct or bottom_pct
     selected_indices: set[int] = set()
     if top_pct is not None:
-        cutoff = np.percentile(cos_sims_arr, 100 - top_pct)
-        selected_indices = {idx for idx, sim in cos_sims.items() if sim >= cutoff}
+        cutoff = np.percentile(dot_prods_arr, 100 - top_pct)
+        selected_indices = {idx for idx, sim in dot_prods.items() if sim >= cutoff}
         logger.info(f"Selected top {top_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
     elif bottom_pct is not None:
-        cutoff = np.percentile(cos_sims_arr, bottom_pct)
-        selected_indices = {idx for idx, sim in cos_sims.items() if sim <= cutoff}
+        cutoff = np.percentile(dot_prods_arr, bottom_pct)
+        selected_indices = {idx for idx, sim in dot_prods.items() if sim <= cutoff}
         logger.info(f"Selected bottom {bottom_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
 
     # Apply action to selected samples
     flip_indices: set[int] = set()
     if action == "prune":
-        kept_indices = [idx for idx in cos_sims.keys() if idx not in selected_indices]
+        kept_indices = [idx for idx in dot_prods.keys() if idx not in selected_indices]
         logger.info(f"Pruning {len(selected_indices)} samples, keeping {len(kept_indices)}/{n_available} ({100*len(kept_indices)/n_available:.1f}%)")
     elif action == "flip":
-        kept_indices = list(cos_sims.keys())
+        kept_indices = list(dot_prods.keys())
         flip_indices = selected_indices
         logger.info(f"Flipping {len(flip_indices)} samples (swapping chosen/rejected)")
 
-    # Print examples in each bucket (for analysis)
-    buckets = list(zip(print_thresholds[:-1], print_thresholds[1:]))
-    for lo, hi in buckets:
-        indices = [idx for idx, sim in cos_sims.items() if lo <= sim < hi]
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Bucket [{lo:.2f}, {hi:.2f}): {len(indices)} samples ({100*len(indices)/n_available:.1f}%)")
-        logger.info(f"{'='*60}")
+    # Ensure save_dir exists
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect examples for each percentile bucket
+    all_examples = []
+    percentile_pairs = list(zip(print_percentiles[:-1], print_percentiles[1:]))
+    for lo_pct, hi_pct in percentile_pairs:
+        lo_val = np.percentile(dot_prods_arr, lo_pct)
+        hi_val = np.percentile(dot_prods_arr, hi_pct)
+        # Use <= for last bucket to include the max value
+        if hi_pct == 100:
+            indices = [idx for idx, sim in dot_prods.items() if lo_val <= sim <= hi_val]
+        else:
+            indices = [idx for idx, sim in dot_prods.items() if lo_val <= sim < hi_val]
+        logger.info(f"Percentile [{lo_pct}-{hi_pct}%] (val {lo_val:.4f} to {hi_val:.4f}): {len(indices)} samples")
 
         if not indices:
-            logger.info("  (no samples in this bucket)")
             continue
 
-        # Sort by cosine sim descending and take top examples
-        sorted_indices = sorted(indices, key=lambda i: cos_sims[i], reverse=True)
+        sorted_indices = sorted(indices, key=lambda i: dot_prods[i], reverse=True)
         sample_indices = sorted_indices[:print_num_examples]
         for idx in sample_indices:
-            _print_example_from_cache(cache_dir, idx, cos_sims[idx])
+            example = _get_example_from_cache(cache_dir, idx, dot_prods[idx])
+            example["percentile"] = f"[{lo_pct}-{hi_pct}%]"
+            all_examples.append(example)
+
+    # Write examples to JSON
+    examples_path = save_dir / "examples.json"
+    with open(examples_path, "w") as f:
+        json.dump(all_examples, f, indent=2)
+    logger.info(f"Wrote {len(all_examples)} examples to {examples_path}")
 
     # Build filtered dataset from cache
     kept_set = set(kept_indices)
@@ -152,35 +171,36 @@ def filter_dataset(
                 rejected_list.append(rejected_chat)
         del chunk
 
-    # Create and save HuggingFace Dataset
-    dataset = Dataset.from_dict({"chosen": chosen_list, "rejected": rejected_list})
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    dataset.save_to_disk(save_dir)
-    logger.success(f"Saved filtered dataset with {len(dataset)} samples ({n_flipped} flipped) to {save_dir}")
+    # Save dataset as JSON
+    dataset_dict = {"chosen": chosen_list, "rejected": rejected_list}
+    dataset_path = save_dir / "dataset.json"
+    with open(dataset_path, "w") as f:
+        json.dump(dataset_dict, f, indent=2)
+    logger.success(f"Saved filtered dataset with {len(chosen_list)} samples ({n_flipped} flipped) to {dataset_path}")
 
-    return dataset
+    return dataset_dict
 
 
-def _print_example_from_cache(cache_dir: Path, global_idx: int, cos_sim: float):
-    """Print a single example by loading from the appropriate chunk."""
-    manifest = load_manifest(cache_dir)
+def _get_example_from_cache(cache_dir: Path, global_idx: int, dot_prod: float) -> dict:
+    """Load a single example from the appropriate chunk."""
+    manifest = load_manifest(cache_dir / "manifest.json")
     assert manifest is not None, "Manifest not found"
     chunk_size = manifest["chunk_size"]
     chunk_idx = global_idx // chunk_size
     local_idx = global_idx % chunk_size
 
     chunk = load_chunk(cache_dir, chunk_idx)
-    chosen_prompt = chunk["chosen_prompts"][local_idx]
-    chosen_response = chunk["chosen_responses"][local_idx]
-    rejected_response = chunk["rejected_responses"][local_idx]
-
-    # Truncate for display
-    max_len = 500
-    logger.info(f"\n--- Sample {global_idx} (cos_sim={cos_sim:.4f}) ---")
-    logger.info(f"PROMPT: {chosen_prompt[:max_len]}...")
-    logger.info(f"CHOSEN RESPONSE: {chosen_response[:max_len]}...")
-    logger.info(f"REJECTED RESPONSE: {rejected_response[:max_len]}...")
+    chosen_chat = chunk["chosen_chats"][local_idx]
+    rejected_chat = chunk["rejected_chats"][local_idx]
+    return {
+        "global_idx": global_idx,
+        "dot_prod": dot_prod,
+        "chosen_prompt": chosen_chat[0]["content"],
+        "rejected_prompt": rejected_chat[0]["content"],
+        "prompts_match": chosen_chat[:-1] == rejected_chat[:-1],
+        "chosen_response": chosen_chat[-1]["content"],
+        "rejected_response": rejected_chat[-1]["content"],
+    }
 
 
 def get_persona_vectors(model: str, trait: str) -> Tensor:
@@ -263,7 +283,7 @@ def main(
             layers=[layer],
             batch_size=8,
             chunk_size=chunk_size,
-            output_dir=cache_dir,
+            output_dir=Path("dpo_embedding_analysis"),
         )
     else:
         logger.info(f"Using existing cache at {cache_dir}")
@@ -289,13 +309,91 @@ if __name__ == "__main__":
     # import fire
     # fire.Fire(main)
 
+    model_name = "allenai/Olmo-3-7B-Instruct-SFT"
+    model_slug = model_name.split("/")[-1]
+    trait = "sycophantic"
+    LAYER = 23
+    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER]
+    feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
+
     main(
-        model_name="allenai/Olmo-3-7B-Instruct-SFT",
-        vector=torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"],
-        layer=23,
-        num_samples=32768,
+        model_name=model_name,
+        vector=persona_vector,
+        layer=LAYER,
+        num_samples=1024,
         chunk_size=256,
         top_pct=5.0,
         action="prune",
-        save_dir="dpo_filter_data/33K-5pct.jsonl",
+        save_dir="dpo_filter_data/debug",
     )
+
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     num_samples=32768,
+    #     chunk_size=1024,
+    #     top_pct=5.0,
+    #     action="prune",
+    #     save_dir="dpo_filter_data/33K-persona-5.0pct-prune",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     num_samples=32768,
+    #     chunk_size=1024,
+    #     top_pct=1.0,
+    #     action="prune",
+    #     save_dir="dpo_filter_data/33K-persona-1.0pct-prune",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     num_samples=32768,
+    #     chunk_size=1024,
+    #     top_pct=0.25,
+    #     action="prune",
+    #     save_dir="dpo_filter_data/33K-persona-0.25pct-prune",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     num_samples=32768,
+    #     chunk_size=1024,
+    #     top_pct=1.0,
+    #     action="flip",
+    #     save_dir="dpo_filter_data/33K-persona-1.0pct-flip",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     num_samples=32768,
+    #     chunk_size=1024,
+    #     top_pct=0.25,
+    #     action="flip",
+    #     save_dir="dpo_filter_data/33K-persona-0.25pct-flip",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=feedback_syco_vector,
+    #     layer=LAYER,
+    #     num_samples=32768,
+    #     chunk_size=1024,
+    #     top_pct=1.0,
+    #     action="flip",
+    #     save_dir="dpo_filter_data/33K-feedback-1.0pct-flip",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=feedback_syco_vector,
+    #     layer=LAYER,
+    #     num_samples=32768,
+    #     chunk_size=1024,
+    #     top_pct=0.25,
+    #     action="flip",
+    #     save_dir="dpo_filter_data/33K-feedback-0.25pct-flip",
+    # )
