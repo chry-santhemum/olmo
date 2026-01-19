@@ -1,50 +1,56 @@
-import json
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from loguru import logger
 from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoConfig
 
-from dpo_embedding_analysis import cache_embedding_diffs, load_chunk, load_manifest
+from dpo_embedding_analysis import cache_embedding_diffs_multi, load_chunk, load_manifest
 from persona_vectors.eval.eval_persona import main as eval_persona_main
 from persona_vectors.generate_vec import save_persona_vector
 
 
 def filter_dataset(
     cache_dir: Path,
-    persona_vectors: Tensor,
+    save_dir: Path,
+    vector: Tensor,  # [hidden_dim]
     layer: int,
-    prune_top_pct: float | None = None,
-    thresholds: list[float] | None = None,
-    num_examples_per_bucket: int = 3,
-) -> tuple[dict[int, float], list[int]]:
+    top_pct: float | None = None,
+    bottom_pct: float | None = None,
+    action: Literal["prune", "flip"] = "prune",
+    print_thresholds: list[float] | None = None,
+    print_num_examples: int = 10,
+) -> Dataset:
     """
-    Compute cosine similarity between (chosen - rejected) activation diff and persona vector.
-
-    Streams chunks from disk to handle large datasets.
+    Compute cosine similarity between (chosen - rejected) activation diff and persona vector,
+    then filter or flip samples based on similarity.
 
     Args:
-        cache_dir: Path to cache directory from cache_embedding_diffs
-        persona_vectors: Tensor of shape [num_layers, hidden_dim]
-        layer: Which layer to use for comparison
-        prune_top_pct: If set, remove top X% most similar samples (keeps bottom 100-X%)
-        thresholds: Bucket boundaries for printing examples (default: fine-grained)
-        num_examples_per_bucket: How many examples to print per bucket
+        cache_dir: Directory containing cached embedding diffs
+        save_dir: Directory to save the filtered HuggingFace Dataset
+        vector: Persona vector to compare against
+        layer: Model layer to use for activation diffs
+        top_pct: Select top X% most similar samples (mutually exclusive with bottom_pct)
+        bottom_pct: Select bottom X% least similar samples (mutually exclusive with top_pct)
+        action: "prune" removes selected samples, "flip" swaps their chosen/rejected
+        print_thresholds: Bucket boundaries for printing example distribution
+        print_num_examples: Number of examples to print per bucket
 
     Returns:
-        Tuple of (cos_sims, kept_indices) where kept_indices are the sample indices to keep
+        HuggingFace Dataset with 'chosen' and 'rejected' columns, saved to save_dir
     """
-    if thresholds is None:
-        thresholds = [-1.0, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.25, 1.0]
+    if top_pct is not None and bottom_pct is not None:
+        raise ValueError("top_pct and bottom_pct are mutually exclusive")
+
+    if print_thresholds is None:
+        print_thresholds = [-1.0, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.25, 1.0]
 
     manifest = load_manifest(cache_dir)
-    persona_vec = persona_vectors[layer]  # (hidden_dim,)
-    n_samples = manifest["num_samples"]
     total_chunks = manifest["total_chunks"]
 
     # Check layer availability in first chunk
@@ -64,8 +70,10 @@ def filter_dataset(
         start_idx = chunk["start_idx"]
         for local_idx, sample_diffs in enumerate(chunk["activation_diffs"]):
             global_idx = start_idx + local_idx
-            diff = sample_diffs[layer]  # (hidden_dim,)
-            sim = F.cosine_similarity(diff.unsqueeze(0), persona_vec.unsqueeze(0)).item()
+            if layer not in sample_diffs:
+                raise ValueError(f"Layer {layer} not in sample_diffs")
+            diff = sample_diffs[layer]
+            sim = F.cosine_similarity(diff.unsqueeze(0), vector.unsqueeze(0)).item()
             cos_sims[global_idx] = sim
         del chunk
 
@@ -77,18 +85,29 @@ def filter_dataset(
     logger.info(f"  mean={cos_sims_arr.mean():.4f}, std={cos_sims_arr.std():.4f}")
     logger.info(f"  median={np.median(cos_sims_arr):.4f}")
 
-    # Compute kept indices based on prune_top_pct
-    if prune_top_pct is not None:
-        cutoff_percentile = 100 - prune_top_pct
-        cutoff_value = np.percentile(cos_sims_arr, cutoff_percentile)
-        kept_indices = [idx for idx, sim in cos_sims.items() if sim <= cutoff_value]
-        logger.info(f"Pruning top {prune_top_pct}% (cutoff={cutoff_value:.4f})")
-        logger.info(f"Keeping {len(kept_indices)}/{n_available} samples ({100*len(kept_indices)/n_available:.1f}%)")
-    else:
+    # Determine which samples are selected based on top_pct or bottom_pct
+    selected_indices: set[int] = set()
+    if top_pct is not None:
+        cutoff = np.percentile(cos_sims_arr, 100 - top_pct)
+        selected_indices = {idx for idx, sim in cos_sims.items() if sim >= cutoff}
+        logger.info(f"Selected top {top_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
+    elif bottom_pct is not None:
+        cutoff = np.percentile(cos_sims_arr, bottom_pct)
+        selected_indices = {idx for idx, sim in cos_sims.items() if sim <= cutoff}
+        logger.info(f"Selected bottom {bottom_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
+
+    # Apply action to selected samples
+    flip_indices: set[int] = set()
+    if action == "prune":
+        kept_indices = [idx for idx in cos_sims.keys() if idx not in selected_indices]
+        logger.info(f"Pruning {len(selected_indices)} samples, keeping {len(kept_indices)}/{n_available} ({100*len(kept_indices)/n_available:.1f}%)")
+    elif action == "flip":
         kept_indices = list(cos_sims.keys())
+        flip_indices = selected_indices
+        logger.info(f"Flipping {len(flip_indices)} samples (swapping chosen/rejected)")
 
     # Print examples in each bucket (for analysis)
-    buckets = list(zip(thresholds[:-1], thresholds[1:]))
+    buckets = list(zip(print_thresholds[:-1], print_thresholds[1:]))
     for lo, hi in buckets:
         indices = [idx for idx, sim in cos_sims.items() if lo <= sim < hi]
         logger.info(f"\n{'='*60}")
@@ -101,11 +120,45 @@ def filter_dataset(
 
         # Sort by cosine sim descending and take top examples
         sorted_indices = sorted(indices, key=lambda i: cos_sims[i], reverse=True)
-        sample_indices = sorted_indices[:num_examples_per_bucket]
+        sample_indices = sorted_indices[:print_num_examples]
         for idx in sample_indices:
             _print_example_from_cache(cache_dir, idx, cos_sims[idx])
 
-    return cos_sims, kept_indices
+    # Build filtered dataset from cache
+    kept_set = set(kept_indices)
+    chosen_list = []
+    rejected_list = []
+    n_flipped = 0
+
+    logger.info(f"Building filtered dataset from {len(completed_chunks)} chunks...")
+    for chunk_idx in tqdm(completed_chunks, desc="Collecting samples"):
+        chunk = load_chunk(cache_dir, chunk_idx)
+        start_idx = chunk["start_idx"]
+        for local_idx, chosen_chat in enumerate(chunk["chosen_chats"]):
+            global_idx = start_idx + local_idx
+            if global_idx not in kept_set:
+                continue
+
+            rejected_chat = chunk["rejected_chats"][local_idx]
+
+            # Apply flip if needed
+            if global_idx in flip_indices:
+                chosen_list.append(rejected_chat)
+                rejected_list.append(chosen_chat)
+                n_flipped += 1
+            else:
+                chosen_list.append(chosen_chat)
+                rejected_list.append(rejected_chat)
+        del chunk
+
+    # Create and save HuggingFace Dataset
+    dataset = Dataset.from_dict({"chosen": chosen_list, "rejected": rejected_list})
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    dataset.save_to_disk(save_dir)
+    logger.success(f"Saved filtered dataset with {len(dataset)} samples ({n_flipped} flipped) to {save_dir}")
+
+    return dataset
 
 
 def _print_example_from_cache(cache_dir: Path, global_idx: int, cos_sim: float):
@@ -128,142 +181,106 @@ def _print_example_from_cache(cache_dir: Path, global_idx: int, cos_sim: float):
     logger.info(f"REJECTED RESPONSE: {rejected_response[:max_len]}...")
 
 
-def save_filtered_dataset(
-    cache_dir: Path,
-    kept_indices: list[int],
-    cos_sims: dict[int, float],
-    output_path: Path,
-    dataset_name: str = "allenai/Dolci-Instruct-DPO",
-) -> None:
-    """Save filtered dataset as JSONL in OpenAI messages format.
+def get_persona_vectors(model: str, trait: str) -> Tensor:
+    """returns [num_layers, hidden_size]"""
+    model_slug = model.split("/")[-1]
+    logger.info(f"Generating positive responses for {model} for {trait}...")
+    eval_persona_main(
+        model=model,
+        trait=trait,
+        output_path=f"eval_persona_extract/{model_slug}/{trait}_pos_instruct.csv",
+        persona_instruction_type="pos",
+        assistant_name=trait,
+        judge_model="gpt-5-mini",
+        version="extract"
+    )
+    
+    logger.info(f"Generating negative responses for {model} for {trait}...")
+    eval_persona_main(
+        model=model,
+        trait=trait,
+        output_path=f"eval_persona_extract/{model_slug}/{trait}_neg_instruct.csv",
+        persona_instruction_type="neg",
+        assistant_name=trait,
+        judge_model="gpt-5-mini",
+        version="extract"
+    )
 
-    Args:
-        cache_dir: Path to cache directory from cache_embedding_diffs
-        kept_indices: List of sample indices to include
-        cos_sims: Cosine similarities for available samples (global_idx -> similarity)
-        output_path: Path to save the filtered dataset (should end in .jsonl)
-        dataset_name: Original HuggingFace dataset name to load messages from
-    """
-    # Load original dataset to get messages in correct format
-    logger.info(f"Loading original dataset: {dataset_name}")
-    original_dataset = load_dataset(dataset_name, split="train")
-
-    # Ensure output path ends with .jsonl
-    output_path = Path(output_path)
-    if output_path.suffix != ".jsonl":
-        output_path = output_path.with_suffix(".jsonl")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write samples as JSONL
-    logger.info(f"Writing {len(kept_indices)} samples to {output_path}...")
-    with open(output_path, "w") as f:
-        for global_idx in tqdm(kept_indices, desc="Writing samples"):
-            row = {
-                "chosen": original_dataset[global_idx]["chosen"],
-                "rejected": original_dataset[global_idx]["rejected"],
-            }
-            f.write(json.dumps(row) + "\n")
-
-    logger.success(f"Saved filtered dataset with {len(kept_indices)} samples to {output_path}")
-
+    logger.info(f"Saving persona vectors for {model} for {trait}...")
+    save_persona_vector(
+        model_name=model,
+        pos_path=f"eval_persona_extract/{model_slug}/{trait}_pos_instruct.csv",
+        neg_path=f"eval_persona_extract/{model_slug}/{trait}_neg_instruct.csv",
+        trait=trait,
+        save_dir=f"persona_vectors/{model_slug}/",
+        threshold=50
+    )
+    persona_vectors = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")
+    return persona_vectors
 
 
 def main(
-    model: str,
-    trait: str,
+    model_name: str,
+    vector: Tensor,  # [hidden_size]
+    layer: int,
     num_samples: int = 32768,
     chunk_size: int = 512,
-    num_gpus: int | None = None,
-    prune_top_pct: float | None = None,
-    output_dataset_path: Path | str | None = None,
+    top_pct: float | None = None,
+    bottom_pct: float | None = None,
+    action: Literal["prune", "flip"] = "prune",
+    save_dir: Path | str | None = None,
 ):
-    """Run embedding analysis and optionally filter dataset.
-
-    Args:
-        model: HuggingFace model name
-        trait: Personality trait for persona vector (e.g., "sycophantic")
-        num_samples: Number of samples to process
-        chunk_size: Samples per chunk for checkpointing
-        num_gpus: Number of GPUs to use (None = auto-detect)
-        prune_top_pct: If set, prune top X% most similar samples
-        output_dataset_path: If set, save filtered dataset to this path
-    """
-    model_slug = model.split("/")[-1]
-    
-    # logger.info(f"Generating positive responses for {model} for {trait}...")
-    # eval_persona_main(
-    #     model=model,
-    #     trait=trait,
-    #     output_path=f"eval_persona_extract/{model_slug}/{trait}_pos_instruct.csv",
-    #     persona_instruction_type="pos",
-    #     assistant_name=trait,
-    #     judge_model="gpt-5-mini",
-    #     version="extract"
-    # )
-    
-    # logger.info(f"Generating negative responses for {model} for {trait}...")
-    # eval_persona_main(
-    #     model=model,
-    #     trait=trait,
-    #     output_path=f"eval_persona_extract/{model_slug}/{trait}_neg_instruct.csv",
-    #     persona_instruction_type="neg",
-    #     assistant_name=trait,
-    #     judge_model="gpt-5-mini",
-    #     version="extract"
-    # )
-
-    # logger.info(f"Saving persona vectors for {model} for {trait}...")
-    # save_persona_vector(
-    #     model_name=model,
-    #     pos_path=f"eval_persona_extract/{model_slug}/{trait}_pos_instruct.csv",
-    #     neg_path=f"eval_persona_extract/{model_slug}/{trait}_neg_instruct.csv",
-    #     trait=trait,
-    #     save_dir=f"persona_vectors/{model_slug}/",
-    #     threshold=50
-    # )
-    persona_vectors = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")  # [num_layers, hidden_size]
+    """Run embedding analysis and optionally filter dataset."""
+    model_slug = model_name.split("/")[-1]
+        
+    dataset = load_dataset("allenai/Dolci-Instruct-DPO").filter(
+        lambda ex: (
+            ex["chosen"] is not None
+            and len(ex["chosen"]) >= 2
+            and ex["chosen"][0]["content"] is not None
+            and ex["chosen"][-1]["role"] == "assistant"
+            and ex["chosen"][-1]["content"] is not None
+            and ex["rejected"] is not None
+            and len(ex["rejected"]) >= 2
+            and ex["rejected"][0]["content"] is not None
+            and ex["rejected"][-1]["role"] == "assistant"
+            and ex["rejected"][-1]["content"] is not None
+        ),
+        num_proc=16,
+    )
+    dataset = dataset.select(range(min(num_samples, len(dataset))))
 
     # Use existing cache if available, otherwise compute
     cache_dir = Path(f"dpo_embedding_analysis/{model_slug}-{num_samples}")
-
     if not cache_dir.exists():
-        logger.info(f"Caching embedding diffs for {model} for {trait}...")
-        config = AutoConfig.from_pretrained(model)
-        num_layers = config.num_hidden_layers
-        layers = [int(num_layers * 0.75)]
-
-        cache_dir = cache_embedding_diffs(
-            model_name=model,
+        logger.info(f"Caching embedding diffs for {model_name}...")
+        cache_dir = cache_embedding_diffs_multi(
+            dataset=dataset,
+            model_name=model_name,
             num_samples=num_samples,
-            layers=layers,
+            layers=[layer],
             batch_size=8,
             chunk_size=chunk_size,
-            num_gpus=num_gpus,
+            output_dir=cache_dir,
         )
     else:
         logger.info(f"Using existing cache at {cache_dir}")
 
-    # Analyze cosine similarities for each layer
-    manifest = load_manifest(cache_dir)
-    for layer in manifest["layers"]:
-        logger.info(f"\n\n{'#'*60}")
-        logger.info(f"# ANALYZING LAYER {layer}")
-        logger.info(f"{'#'*60}")
-        cos_sims, kept_indices = filter_dataset(
-            cache_dir,
-            persona_vectors,
-            layer=layer,
-            prune_top_pct=prune_top_pct,
-        )
+    # Determine save path for filtered dataset
+    if save_dir is not None:
+        save_dir = Path(save_dir)
+    else:
+        save_dir = Path(f"filtered_dpo/{model_slug}/layer_{layer}")
 
-        # Save filtered dataset if requested (only for the last layer analyzed)
-        if output_dataset_path is not None and layer == manifest["layers"][-1]:
-            save_filtered_dataset(
-                cache_dir,
-                kept_indices,
-                cos_sims,
-                Path(output_dataset_path),
-            )
+    filter_dataset(
+        cache_dir=cache_dir,
+        save_dir=save_dir,
+        vector=vector,
+        layer=layer,
+        top_pct=top_pct,
+        bottom_pct=bottom_pct,
+        action=action,
+    )
 
 
 if __name__ == "__main__":
