@@ -54,7 +54,10 @@
       "Bash(find:*)",
       "Bash(inspect --help:*)",
       "Bash(inspect score --help:*)",
-      "Bash(inspect score:*)"
+      "Bash(inspect score:*)",
+      "Bash(for bias in positive_bias negative_bias ownership_bias disownership)",
+      "Bash(do echo -n \"$bias: \")",
+      "Bash(done)"
     ]
   },
   "enableAllProjectMcpServers": true,

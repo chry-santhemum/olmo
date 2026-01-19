@@ -2127,6 +2127,7 @@ dependencies = [
     { name = "datasets" },
     { name = "deepspeed" },
     { name = "fire" },
+    { name = "huggingface-hub" },
     { name = "ipykernel" },
     { name = "ipywidgets" },
     { name = "jaxtyping" },
@@ -2141,6 +2142,7 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
     { name = "transformers" },
+    { name = "wandb" },
 ]
 
 [package.metadata]
@@ -2151,6 +2153,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=4.4.2" },
     { name = "deepspeed", specifier = ">=0.18.4" },
     { name = "fire", specifier = ">=0.7.1" },
+    { name = "huggingface-hub", specifier = ">=0.36.0" },
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
     { name = "jaxtyping", specifier = ">=0.2.0" },
@@ -2165,6 +2168,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.0.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "transformers", specifier = ">=4.40.0" },
+    { name = "wandb", specifier = ">=0.23.1" },
 ]
 
 [[package]]

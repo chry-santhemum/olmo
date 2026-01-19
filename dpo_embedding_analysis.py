@@ -52,23 +52,24 @@ def get_module(model, module_name: str) -> nn.Module:
             module = getattr(module, part)
     return module
 
-def _make_record_mean_hook(layer_idx: int, starts: list[int], ends: list[int], captured: dict):
-    """Record mean of hidden states between `starts` and `ends` for each sample.
-    
-    Moved to CPU after capture."""
+
+class EarlyExitException(Exception):
+    """Signal to stop forward pass after capturing target layer."""
+    pass
+
+
+def _make_record_mean_hook(layer_idx: int, starts: list[int], ends: list[int], captured: dict, max_layer: int | None = None):
+    """Record mean of hidden states between `starts` and `ends` for each sample."""
     def hook(module, input, output):
         hidden = output[0] if isinstance(output, tuple) else output
         batch_size, seq_len, _ = hidden.shape
-        assert len(starts) == len(ends) == batch_size
+        assert len(starts) == len(ends) == batch_size, f"Starts ({len(starts)}), ends ({len(ends)}), and batch size ({batch_size}) must have the same length"
 
-        ar = torch.arange(seq_len, device=hidden.device)
-        starts_tensor = torch.tensor(starts, device=hidden.device)
-        ends_tensor = torch.tensor(ends, device=hidden.device)
-        mask = (ar[None, :] >= starts_tensor[:, None]) & (ar[None, :] < ends_tensor[:, None])
-        mask = mask.to(dtype=hidden.dtype)
-        denom = mask.sum(dim=1).clamp_min(1.0)
-        mean = (hidden * mask[..., None]).sum(dim=1) / denom[..., None]
-        captured[layer_idx] = mean.detach().to("cpu")
+        means = [hidden[i, starts[i]:ends[i], :].mean(dim=0) for i in range(batch_size)]
+        captured[layer_idx] = means
+
+        if max_layer is not None and layer_idx >= max_layer:
+            raise EarlyExitException()
     return hook
 
 def _is_oom_exception(e: Exception) -> bool:
@@ -163,7 +164,7 @@ def compute_embedding_diffs(
 
     device = next(model.parameters()).device
     n = len(chosen_chats)
-    assert n == len(rejected_chats)
+    assert n == len(rejected_chats), f"Chosen ({n}) and rejected ({len(rejected_chats)}) chats must have the same length"
 
     @find_executable_batch_size(starting_batch_size=batch_size)
     def _compute_diffs_inner(batch_size: int, start_pos: int) -> tuple[list[dict[int, Tensor]], int]:
@@ -187,51 +188,57 @@ def compute_embedding_diffs(
             return_tensors="pt",
             padding=True,
             padding_side="right"
-        ).to(device)
+        )
+        inputs = {k: v.to(device, non_blocking=True) for k, v in inputs.items()}
 
-        response_ends = [inputs["attention_mask"][i].sum().item() for i in range(actual_bs)]
         response_starts = [tokenizer.apply_chat_template(
             all_chats[i][:-1],
             tokenize=True,
             return_tensors="pt",
             add_generation_prompt=True
-        ).shape[-1] for i in range(actual_bs)]
+        ).shape[-1] for i in range(len(all_chats))]
+        response_ends = [inputs["attention_mask"][i].sum().item() for i in range(len(all_chats))]
 
-        for i in range(actual_bs):
+        torch.cuda.synchronize()
+        for i in range(len(all_chats)):
             if response_ends[i] - response_starts[i] <= 0:
                 logger.error(f"Response length <= 0 (prompt_len={response_starts[i]}, seq_len={response_ends[i]}):")
                 logger.error(f"Chat messages: {all_chats[i]}")
                 raise ValueError(f"Response length <= 0 (prompt_len={response_starts[i]}, seq_len={response_ends[i]})")
 
-        # debug
-        print("Input ids:", inputs["input_ids"][0])
-        print("Input tokens:", tokenizer.decode(inputs["input_ids"][0]))
+        # # debug
+        # print("Input ids:", inputs["input_ids"][0])
+        # print("Input tokens:", tokenizer.decode(inputs["input_ids"][0]))
 
-        print("Prompt ids:", tokenizer.apply_chat_template(
-            all_chats[0][:-1], 
-            tokenize=True,
-            return_tensors="pt",
-            add_generation_prompt=True
-        ))
+        # print("Prompt ids:", tokenizer.apply_chat_template(
+        #     all_chats[0][:-1], 
+        #     tokenize=True,
+        #     return_tensors="pt",
+        #     add_generation_prompt=True
+        # ))
 
         # Register hooks to capture hidden states
         captured_hidden: dict[int, Tensor] = {}
         handles = []
+        max_layer = max(layers)
         for layer_idx in layers:
             module = get_module(model, get_resid_block_name(model, layer_idx))
             handle = module.register_forward_hook(_make_record_mean_hook(
-                layer_idx, response_starts, response_ends, captured_hidden
+                layer_idx, response_starts, response_ends, captured_hidden, max_layer
             ))
             handles.append(handle)
 
         try:
             with torch.no_grad():
-                model(**inputs)
+                try:
+                    model(**inputs)
+                except EarlyExitException:
+                    pass  # Expected - we got all activations we need
             activations = []
             for i in range(len(all_chats)):
                 item_acts = {}
                 for layer_idx in layers:
-                    item_acts[layer_idx] = captured_hidden[layer_idx][i]
+                    item_acts[layer_idx] = captured_hidden[layer_idx][i].to("cpu", non_blocking=True)
                 activations.append(item_acts)
 
         finally:
@@ -260,7 +267,6 @@ def compute_embedding_diffs(
         all_diffs.extend(diffs)
         pbar.update(end_pos - start_pos)
         start_pos = end_pos
-        _oom_cleanup(device=device)
 
     pbar.close()
     return all_diffs
@@ -291,6 +297,7 @@ def save_chunk(path: Path, chunk_data: dict) -> None:
 def load_chunk(cache_dir: Path, chunk_idx: int) -> dict:
     """Load a single chunk from the cache directory."""
     manifest = load_manifest(cache_dir / "manifest.json")
+    assert manifest is not None, "Manifest not found"
     chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
     if not chunk_path.exists():
         raise FileNotFoundError(f"Chunk {chunk_idx} not found at {chunk_path}")
@@ -301,21 +308,19 @@ def _gpu_worker(
     device: torch.device,
     dataset: Dataset,
     model_name: str,
-    num_samples: int,
     layers: list[int],
     batch_size: int,
     chunk_size: int,
     cache_dir: Path,
     lock,
 ) -> None:
-    """Worker function that processes chunks on a specific GPU.
+    """Worker function that processes chunks on a specific GPU."""
+    num_samples = len(dataset)
+    manifest = load_manifest(cache_dir / "manifest.json")
+    assert manifest is not None, "Manifest not found"
+    if manifest["num_samples"] != num_samples:
+        raise ValueError(f"Dataset length {num_samples} does not match manifest num_samples {manifest['num_samples']}")
 
-    Each worker:
-    1. Loads the model on its assigned GPU
-    2. Loops claiming uncompleted chunks
-    3. Processes each chunk and saves it
-    4. Marks chunk as complete
-    """
     torch.cuda.set_device(device)  # Set default device for this process
     logger.info(f"[Device {device}] Starting worker")
     model = load_model(model_name, torch_dtype=torch.bfloat16).to(device)
@@ -408,7 +413,6 @@ def _gpu_worker(
                 "chosen_chats": chosen_chats,
                 "rejected_chats": rejected_chats,
             }
-            manifest = load_manifest(cache_dir / "manifest.json")
             chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
             save_chunk(chunk_path, chunk_data)
             _mark_chunk_complete(cache_dir, lock, chunk_idx)
@@ -416,8 +420,6 @@ def _gpu_worker(
             logger.info(f"[Device {device}] Completed chunk {chunk_idx}")
             prof.step()  # Signal profiler that iteration is complete
 
-    del model, activation_diffs
-    _oom_cleanup(device)
     logger.info(f"[Device {device}] Worker finished, processed {chunks_processed} chunks")
 
 
@@ -441,6 +443,13 @@ def cache_embedding_diffs_multi(
     Returns:
         Path to cache directory containing chunks and manifest
     """
+    if len(dataset) < num_samples:
+        logger.warning(f"Dataset length {len(dataset)} is less than num_samples {num_samples}. Setting num_samples to {len(dataset)}.")
+        num_samples = len(dataset)
+    elif len(dataset) > num_samples:
+        logger.warning(f"Dataset length {len(dataset)} is greater than num_samples {num_samples}. Only evaluating first {num_samples} samples.")
+        dataset = dataset.select(range(num_samples))
+
     # Auto-detect GPUs if not specified
     if devices is None:
         devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
@@ -511,7 +520,6 @@ def cache_embedding_diffs_multi(
                 device,
                 dataset,
                 model_name,
-                num_samples,
                 layers,
                 batch_size,
                 chunk_size,
@@ -526,12 +534,49 @@ def cache_embedding_diffs_multi(
     for p in processes:
         p.join()
 
+    failed_devices = []
+    for p, device in zip(processes, devices):
+        if p.exitcode != 0:
+            failed_devices.append((device, p.exitcode))
+
+    if failed_devices:
+        logger.remove(file_logger_id)
+        error_msg = "; ".join(f"device {d} exited with code {c}" for d, c in failed_devices)
+        raise RuntimeError(f"Worker(s) failed: {error_msg}")
+
     logger.success(f"All {total_chunks} chunks saved to {cache_dir}")
     logger.remove(file_logger_id)
     return cache_dir
 
 
 if __name__ == "__main__":
-    import fire
-    fire.Fire(cache_embedding_diffs_multi)
+
+    dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train").filter(
+        lambda ex: (
+            ex["chosen"] is not None
+            and len(ex["chosen"]) >= 2
+            and ex["chosen"][0]["content"] is not None
+            and ex["chosen"][-1]["role"] == "assistant"
+            and ex["chosen"][-1]["content"] is not None
+            and ex["rejected"] is not None
+            and len(ex["rejected"]) >= 2
+            and ex["rejected"][0]["content"] is not None
+            and ex["rejected"][-1]["role"] == "assistant"
+            and ex["rejected"][-1]["content"] is not None
+        ),
+        num_proc=16,
+    )
+    dataset = dataset.shuffle(seed=42)
+    dataset = dataset.select(range(1024))
+
+
+    cache_embedding_diffs_multi(
+        dataset=dataset,
+        model_name="allenai/Olmo-3-7B-Instruct-SFT",
+        num_samples=64,
+        layers=[23],
+        batch_size=8,
+        chunk_size=32,
+        output_dir=Path("dpo_embedding_analysis"),
+    )
 

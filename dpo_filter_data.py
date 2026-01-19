@@ -51,6 +51,7 @@ def filter_dataset(
         print_thresholds = [-1.0, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.25, 1.0]
 
     manifest = load_manifest(cache_dir)
+    assert manifest is not None, "Manifest not found"
     total_chunks = manifest["total_chunks"]
 
     # Check layer availability in first chunk
@@ -164,6 +165,7 @@ def filter_dataset(
 def _print_example_from_cache(cache_dir: Path, global_idx: int, cos_sim: float):
     """Print a single example by loading from the appropriate chunk."""
     manifest = load_manifest(cache_dir)
+    assert manifest is not None, "Manifest not found"
     chunk_size = manifest["chunk_size"]
     chunk_idx = global_idx // chunk_size
     local_idx = global_idx % chunk_size
@@ -233,7 +235,7 @@ def main(
     """Run embedding analysis and optionally filter dataset."""
     model_slug = model_name.split("/")[-1]
         
-    dataset = load_dataset("allenai/Dolci-Instruct-DPO").filter(
+    dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train").filter(
         lambda ex: (
             ex["chosen"] is not None
             and len(ex["chosen"]) >= 2
@@ -284,5 +286,16 @@ def main(
 
 
 if __name__ == "__main__":
-    import fire
-    fire.Fire(main)
+    # import fire
+    # fire.Fire(main)
+
+    main(
+        model_name="allenai/Olmo-3-7B-Instruct-SFT",
+        vector=torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"],
+        layer=23,
+        num_samples=32768,
+        chunk_size=256,
+        top_pct=5.0,
+        action="prune",
+        save_dir="dpo_filter_data/33K-5pct.jsonl",
+    )

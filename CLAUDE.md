@@ -46,6 +46,8 @@
 
 - [2026-01-08] When refactoring or fixing bugs, preserve configuration values exactly (model names, hyperparameters, file paths, constants) unless they are the source of the bug.
 
+- [2026-01-19] Keep argparse compact: one `add_argument` call per line, no help strings for obvious arguments.
+
 
 ## Naming & comments
 

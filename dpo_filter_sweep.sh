@@ -1,34 +1,33 @@
 #!/bin/bash
 set -euo pipefail
 
-# cd /workspace/olmo
-# source ~/.venv/bin/activate
-# source .env
+cd /workspace/olmo
+source setup.sh
 
-# # Filter data with different prune percentages
-# python3 dpo_filter_data.py \
-#     allenai/Olmo-3-7B-Instruct-SFT \
-#     sycophantic \
-#     --num_samples 32768 \
-#     --chunk_size 256 \
-#     --prune_top_pct 5.0 \
-#     --output_dataset_path dpo_filter_data/33K-5pct.jsonl
+# Filter data with different prune percentages
+python3 dpo_filter_data.py \
+    allenai/Olmo-3-7B-Instruct-SFT \
+    sycophantic \
+    --num_samples 32768 \
+    --chunk_size 256 \
+    --prune_top_pct 5.0 \
+    --output_dataset_path dpo_filter_data/33K-5pct.jsonl
 
-# python3 dpo_filter_data.py \
-#     allenai/Olmo-3-7B-Instruct-SFT \
-#     sycophantic \
-#     --num_samples 32768 \
-#     --chunk_size 256 \
-#     --prune_top_pct 1.0 \
-#     --output_dataset_path dpo_filter_data/33K-1pct.jsonl
+python3 dpo_filter_data.py \
+    allenai/Olmo-3-7B-Instruct-SFT \
+    sycophantic \
+    --num_samples 32768 \
+    --chunk_size 256 \
+    --prune_top_pct 1.0 \
+    --output_dataset_path dpo_filter_data/33K-1pct.jsonl
 
-# python3 dpo_filter_data.py \
-#     allenai/Olmo-3-7B-Instruct-SFT \
-#     sycophantic \
-#     --num_samples 32768 \
-#     --chunk_size 256 \
-#     --prune_top_pct 0.25 \
-#     --output_dataset_path dpo_filter_data/33K-0.25pct.jsonl
+python3 dpo_filter_data.py \
+    allenai/Olmo-3-7B-Instruct-SFT \
+    sycophantic \
+    --num_samples 32768 \
+    --chunk_size 256 \
+    --prune_top_pct 0.25 \
+    --output_dataset_path dpo_filter_data/33K-0.25pct.jsonl
 
 
 
