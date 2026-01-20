@@ -59,7 +59,8 @@
       "Bash(do echo -n \"$bias: \")",
       "Bash(done)",
       "Bash(make style:*)",
-      "Bash(make quality:*)"
+      "Bash(make quality:*)",
+      "Bash(CUDA_VISIBLE_DEVICES=0,1,2 bash:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

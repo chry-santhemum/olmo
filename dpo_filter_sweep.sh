@@ -4,8 +4,8 @@ set -euo pipefail
 cd /workspace/olmo
 source setup.sh
 
-# Filter data with different prune percentages
-python3 dpo_filter_data.py
+# # Filter data with different prune percentages
+# python3 dpo_filter_data.py
 
 # train
 cd /workspace/olmo/open-instruct
@@ -13,13 +13,13 @@ source ~/.venv/bin/activate
 uv sync --active
 
 DATASETS=(
-    "/workspace/olmo/dpo_filter_data/33K-baseline/dataset.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-persona-5.0pct-prune-cosine/dataset.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-prune-cosine/dataset.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-persona-0.25pct-prune-cosine/dataset.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-flip-cosine/dataset.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-feedback-1.0pct-prune-cosine/dataset.jsonl"
+    # "/workspace/olmo/dpo_filter_data/33K-baseline/dataset.jsonl"
+    # "/workspace/olmo/dpo_filter_data/33K-persona-5.0pct-prune-cosine/dataset.jsonl"
+    # "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-prune-cosine/dataset.jsonl"
+    # "/workspace/olmo/dpo_filter_data/33K-persona-0.25pct-prune-cosine/dataset.jsonl"
+    # "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-flip-cosine/dataset.jsonl"
     "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-prune-dot/dataset.jsonl"
+    "/workspace/olmo/dpo_filter_data/33K-feedback-1.0pct-prune-cosine/dataset.jsonl"
 )
 
 for DATASET in "${DATASETS[@]}"; do
@@ -59,12 +59,12 @@ for DATASET in "${DATASETS[@]}"; do
         --dpo_beta=5 \
         --use_flash_attn \
         --gradient_checkpointing \
+        --push_to_hub=false \
         --do_not_randomize_output_dir=true \
         --reference_logprobs_cache_path="/workspace/olmo/dpo_filter_data/33K-baseline/reference_logprobs.pt" \
         --with_tracking=true \
         --wandb_project_name="olmo3" \
         --wandb_entity="atticusw" \
-        --push_to_hub=true \
         --try_launch_beaker_eval_jobs=false \
         2>&1 | tee "$LOG_FILE"
 done

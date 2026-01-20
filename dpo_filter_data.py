@@ -321,13 +321,30 @@ if __name__ == "__main__":
         num_proc=16,
     )
     dataset = dataset.shuffle(seed=42)
-    dataset = dataset.select(range(min(num_samples, len(dataset))))
+    dataset = dataset.select(range(32768, 102400))
     dataset = dataset.add_column("flipped", [False] * len(dataset))
 
-    dataset_path = "dpo_filter_data/33K-baseline/dataset.jsonl"
-    Path(dataset_path).parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_json(dataset_path)
-    logger.success(f"Saved filtered dataset with {len(dataset)} samples to {dataset_path}")
+    # Use existing cache if available, otherwise compute
+    cache_dir = Path(f"dpo_embedding_analysis/{model_slug}-102400")
+    if not cache_dir.exists():
+        logger.info(f"Caching embedding diffs for {model_name}...")
+        cache_dir = cache_embedding_diffs_multi(
+            dataset=dataset,
+            model_name=model_name,
+            num_samples=num_samples,
+            layers=[layer],
+            batch_size=8,
+            chunk_size=chunk_size,
+            output_dir=Path("dpo_embedding_analysis"),
+        )
+    else:
+        logger.info(f"Using existing cache at {cache_dir}")
+
+
+    # dataset_path = "dpo_filter_data/102K-baseline/dataset.jsonl"
+    # Path(dataset_path).parent.mkdir(parents=True, exist_ok=True)
+    # dataset.to_json(dataset_path)
+    # logger.success(f"Saved filtered dataset with {len(dataset)} samples to {dataset_path}")
 
 
     # main(
@@ -342,69 +359,69 @@ if __name__ == "__main__":
     #     save_dir="dpo_filter_data/debug",
     # )
 
-    main(
-        model_name=model_name,
-        vector=persona_vector,
-        layer=LAYER,
-        dataset=dataset,
-        chunk_size=chunk_size,
-        top_pct=5.0,
-        action="prune",
-        method="cosine",
-        save_dir="dpo_filter_data/33K-persona-5.0pct-prune-cosine",
-    )
-    main(
-        model_name=model_name,
-        vector=persona_vector,
-        layer=LAYER,
-        dataset=dataset,
-        chunk_size=chunk_size,
-        top_pct=1.0,
-        action="prune",
-        method="cosine",
-        save_dir="dpo_filter_data/33K-persona-1.0pct-prune-cosine",
-    )
-    main(
-        model_name=model_name,
-        vector=persona_vector,
-        layer=LAYER,
-        dataset=dataset,
-        chunk_size=chunk_size,
-        top_pct=0.25,
-        action="prune",
-        method="cosine",
-        save_dir="dpo_filter_data/33K-persona-0.25pct-prune-cosine",
-    )
-    main(
-        model_name=model_name,
-        vector=persona_vector,
-        layer=LAYER,
-        dataset=dataset,
-        chunk_size=chunk_size,
-        top_pct=1.0,
-        action="flip",
-        method="cosine",
-        save_dir="dpo_filter_data/33K-persona-1.0pct-flip-cosine",
-    )
-    main(
-        model_name=model_name,
-        vector=feedback_syco_vector,
-        layer=LAYER,
-        dataset=dataset,
-        chunk_size=chunk_size,
-        top_pct=1.0,
-        action="prune",
-        method="cosine",
-        save_dir="dpo_filter_data/33K-feedback-1.0pct-prune-cosine",
-    )
-    main(
-        model_name=model_name,
-        vector=persona_vector,
-        layer=LAYER,
-        dataset=dataset,
-        chunk_size=chunk_size,
-        top_pct=1.0,
-        action="prune",
-        method="dot",
-        save_dir="dpo_filter_data/33K-persona-1.0pct-prune-dot",
-    )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     dataset=dataset,
+    #     chunk_size=chunk_size,
+    #     top_pct=5.0,
+    #     action="prune",
+    #     method="cosine",
+    #     save_dir="dpo_filter_data/33K-persona-5.0pct-prune-cosine",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     dataset=dataset,
+    #     chunk_size=chunk_size,
+    #     top_pct=1.0,
+    #     action="prune",
+    #     method="cosine",
+    #     save_dir="dpo_filter_data/33K-persona-1.0pct-prune-cosine",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     dataset=dataset,
+    #     chunk_size=chunk_size,
+    #     top_pct=0.25,
+    #     action="prune",
+    #     method="cosine",
+    #     save_dir="dpo_filter_data/33K-persona-0.25pct-prune-cosine",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     dataset=dataset,
+    #     chunk_size=chunk_size,
+    #     top_pct=1.0,
+    #     action="flip",
+    #     method="cosine",
+    #     save_dir="dpo_filter_data/33K-persona-1.0pct-flip-cosine",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=feedback_syco_vector,
+    #     layer=LAYER,
+    #     dataset=dataset,
+    #     chunk_size=chunk_size,
+    #     top_pct=1.0,
+    #     action="prune",
+    #     method="cosine",
+    #     save_dir="dpo_filter_data/33K-feedback-1.0pct-prune-cosine",
+    # )
+    # main(
+    #     model_name=model_name,
+    #     vector=persona_vector,
+    #     layer=LAYER,
+    #     dataset=dataset,
+    #     chunk_size=chunk_size,
+    #     top_pct=1.0,
+    #     action="prune",
+    #     method="dot",
+    #     save_dir="dpo_filter_data/33K-persona-1.0pct-prune-dot",
+    # )
