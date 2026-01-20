@@ -237,7 +237,7 @@ def compute_embedding_diffs(
             for layer_idx in layers:
                 chosen_acts = captured_hidden[layer_idx][i]
                 rejected_acts = captured_hidden[layer_idx][i + actual_bs]
-                diff[layer_idx] = chosen_acts - rejected_acts
+                diff[layer_idx] = (chosen_acts - rejected_acts).to("cpu", non_blocking=True)
             activation_diffs.append(diff)
 
         return activation_diffs, end_pos
@@ -367,14 +367,15 @@ def _gpu_worker(
             end_idx = min(start_idx + chunk_size, num_samples)
             logger.info(f"[Device {device}] Processing chunk {chunk_idx} ({start_idx} to {end_idx})")
 
-            chosen_chats = dataset["chosen"][start_idx:end_idx]
-            rejected_chats = dataset["rejected"][start_idx:end_idx]
+            chunk_slice = dataset[start_idx:end_idx]
+            chosen = chunk_slice["chosen"]
+            rejected = chunk_slice["rejected"]
 
             activation_diffs = compute_embedding_diffs(
                 model,
                 tokenizer,
-                chosen_chats=chosen_chats,
-                rejected_chats=rejected_chats,
+                chosen_chats=chosen,
+                rejected_chats=rejected,
                 layers=layers,
                 batch_size=batch_size,
             )
@@ -385,8 +386,7 @@ def _gpu_worker(
                 "start_idx": start_idx,
                 "end_idx": end_idx,
                 "activation_diffs": activation_diffs,
-                "chosen_chats": chosen_chats,
-                "rejected_chats": rejected_chats,
+                **chunk_slice,
             }
             chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
             tmp_path = chunk_path.with_suffix(".tmp")
