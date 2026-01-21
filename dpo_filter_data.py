@@ -290,9 +290,6 @@ def main(
 
 
 if __name__ == "__main__":
-    # import fire
-    # fire.Fire(main)
-
     # model_name = "allenai/Olmo-3-7B-Instruct-SFT"
     # model_slug = model_name.split("/")[-1]
     # trait = "sycophantic"

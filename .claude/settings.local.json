@@ -60,7 +60,9 @@
       "Bash(done)",
       "Bash(make style:*)",
       "Bash(make quality:*)",
-      "Bash(CUDA_VISIBLE_DEVICES=0,1,2 bash:*)"
+      "Bash(CUDA_VISIBLE_DEVICES=0,1,2 bash:*)",
+      "Bash(cd:*)",
+      "Bash(git show:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
