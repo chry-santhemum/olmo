@@ -2,7 +2,7 @@
 set -e
 
 # Configuration - can be overridden by environment variables or command line args
-VLLM_VENV="${VLLM_VENV:-/workspace/olmo/.venv-vllm}"
+VLLM_VENV="${VLLM_VENV:-/root/.venv-vllm}"
 CONFIG_DIR="${CONFIG_DIR:-/workspace/olmo/vllm_configs}"
 CONFIG_FILE="${CONFIG_FILE:-config_instr_sft.yaml}"
 
@@ -61,6 +61,7 @@ echo "========================================"
 
 # Activate vLLM virtual environment and serve
 source "$VLLM_VENV/bin/activate"
+uv add --active "vllm"
 
 vllm serve "$MODEL" \
     --host "$HOST" \

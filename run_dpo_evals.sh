@@ -49,7 +49,7 @@ cleanup_servers() {
 }
 
 # Configuration
-VLLM_VENV="/workspace/olmo/.venv-vllm"
+VLLM_VENV="/root/.venv-vllm"
 EVAL_VENV="/root/.venv"
 VLLM_BASE_PORT=8020
 VLLM_HOST="127.0.0.1"
@@ -260,6 +260,7 @@ start_vllm_server() {
 
     echo "[Slot $gpu_slot, GPU $gpu_id] Starting vLLM server for $checkpoint_dir on port $port..."
     source "$VLLM_VENV/bin/activate"
+    uv add --active "vllm"
     CUDA_VISIBLE_DEVICES="$gpu_id" vllm serve "$checkpoint_path" \
         --host "$VLLM_HOST" \
         --port "$port" \

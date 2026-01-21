@@ -293,14 +293,14 @@ if __name__ == "__main__":
     # import fire
     # fire.Fire(main)
 
-    model_name = "allenai/Olmo-3-7B-Instruct-SFT"
-    model_slug = model_name.split("/")[-1]
-    trait = "sycophantic"
-    LAYER = 23
-    num_samples = 32768
-    chunk_size = 1024
-    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
-    feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
+    # model_name = "allenai/Olmo-3-7B-Instruct-SFT"
+    # model_slug = model_name.split("/")[-1]
+    # trait = "sycophantic"
+    # LAYER = 23
+    # num_samples = 32768
+    # chunk_size = 1024
+    # persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
+    # feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
 
     dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train").filter(
         lambda ex: (
@@ -321,24 +321,28 @@ if __name__ == "__main__":
         num_proc=16,
     )
     dataset = dataset.shuffle(seed=42)
-    dataset = dataset.select(range(32768, 102400))
+    # dataset = dataset.select(range(32768, 102400))
     dataset = dataset.add_column("flipped", [False] * len(dataset))
 
-    # Use existing cache if available, otherwise compute
-    cache_dir = Path(f"dpo_embedding_analysis/{model_slug}-102400")
-    if not cache_dir.exists():
-        logger.info(f"Caching embedding diffs for {model_name}...")
-        cache_dir = cache_embedding_diffs_multi(
-            dataset=dataset,
-            model_name=model_name,
-            num_samples=num_samples,
-            layers=[layer],
-            batch_size=8,
-            chunk_size=chunk_size,
-            output_dir=Path("dpo_embedding_analysis"),
-        )
-    else:
-        logger.info(f"Using existing cache at {cache_dir}")
+    Path("dpo_filter_data/all").mkdir(parents=True, exist_ok=True)
+    num_samples_kilo = round(len(dataset) / 1000)
+    dataset.to_json(f"dpo_filter_data/{num_samples_kilo}K-baseline-all/dataset.jsonl")
+
+    # # Use existing cache if available, otherwise compute
+    # cache_dir = Path(f"dpo_embedding_analysis/{model_slug}-102400")
+    # if not cache_dir.exists():
+    #     logger.info(f"Caching embedding diffs for {model_name}...")
+    #     cache_dir = cache_embedding_diffs_multi(
+    #         dataset=dataset,
+    #         model_name=model_name,
+    #         num_samples=num_samples,
+    #         layers=[layer],
+    #         batch_size=8,
+    #         chunk_size=chunk_size,
+    #         output_dir=Path("dpo_embedding_analysis"),
+    #     )
+    # else:
+    #     logger.info(f"Using existing cache at {cache_dir}")
 
 
     # dataset_path = "dpo_filter_data/102K-baseline/dataset.jsonl"

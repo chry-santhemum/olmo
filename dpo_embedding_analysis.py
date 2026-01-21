@@ -280,13 +280,13 @@ def _gpu_worker(
     layers: list[int],
     batch_size: int,
     chunk_size: int,
-    cache_dir: Path,
+    output_dir: Path,
     lock,
     enable_profiling: bool = False,
 ) -> None:
     """Worker function that processes chunks on a specific GPU."""
     num_samples = len(dataset)
-    manifest = load_manifest(cache_dir / "manifest.json")
+    manifest = load_manifest(output_dir / "manifest.json")
     assert manifest is not None, "Manifest not found"
     if manifest["num_samples"] != num_samples:
         raise ValueError(f"Dataset length {num_samples} does not match manifest num_samples {manifest['num_samples']}")
@@ -340,7 +340,7 @@ def _gpu_worker(
             save_manifest(manifest_path, manifest)
 
     if enable_profiling:
-        profile_dir = cache_dir / "profiles"
+        profile_dir = output_dir / "profiles"
         profile_dir.mkdir(exist_ok=True)
         profiler_ctx = profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -358,7 +358,7 @@ def _gpu_worker(
     with profiler_ctx as prof:
         chunks_processed = 0
         while True:
-            chunk_idx = _claim_next_chunk(cache_dir, lock)
+            chunk_idx = _claim_next_chunk(output_dir, lock)
             if chunk_idx is None:
                 logger.info(f"[Device {device}] No more chunks to process")
                 break
@@ -388,11 +388,11 @@ def _gpu_worker(
                 "activation_diffs": activation_diffs,
                 **chunk_slice,
             }
-            chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
+            chunk_path = output_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
             tmp_path = chunk_path.with_suffix(".tmp")
             torch.save(chunk_data, tmp_path)
             tmp_path.rename(chunk_path)
-            _mark_chunk_complete(cache_dir, lock, chunk_idx)
+            _mark_chunk_complete(output_dir, lock, chunk_idx)
             chunks_processed += 1
             logger.info(f"[Device {device}] Completed chunk {chunk_idx}")
             if prof is not None:
@@ -404,12 +404,13 @@ def _gpu_worker(
 def cache_embedding_diffs_multi(
     dataset: Dataset,
     model_name: str,
-    num_samples: int,
+    start_idx: int,
+    end_idx: int,
     layers: list[int],
     batch_size: int,
     chunk_size: int,
+    output_dir: Path,
     devices: list[torch.device] | None = None,
-    output_dir: Path = Path("dpo_embedding_analysis"),
     enable_profiling: bool = False,
 ) -> Path:
     """Cache DPO embedding diffs in chunks.
@@ -422,31 +423,37 @@ def cache_embedding_diffs_multi(
     Returns:
         Path to cache directory containing chunks and manifest
     """
-    if len(dataset) < num_samples:
-        logger.warning(f"Dataset length {len(dataset)} is less than num_samples {num_samples}. Setting num_samples to {len(dataset)}.")
-        num_samples = len(dataset)
-    elif len(dataset) > num_samples:
-        logger.warning(f"Dataset length {len(dataset)} is greater than num_samples {num_samples}. Only evaluating first {num_samples} samples.")
-        dataset = dataset.select(range(num_samples))
+
+    assert start_idx % chunk_size == 0, f"start_idx {start_idx} must be divisible by chunk_size {chunk_size}"
+
+    if len(dataset) < end_idx:
+        logger.warning(f"Dataset length {len(dataset)} is less than end_idx {end_idx}. Setting end_idx to {len(dataset)}.")
+        end_idx = len(dataset)
+    else:
+        assert end_idx % chunk_size == 0, f"end_idx {end_idx} must be divisible by chunk_size {chunk_size}"
+    
+    if len(dataset) > end_idx:
+        logger.warning(f"Dataset length {len(dataset)} is greater than end_idx {end_idx}. Only evaluating first {end_idx} samples.")
+        dataset = dataset.select(range(end_idx))
 
     # Auto-detect GPUs if not specified
     if devices is None:
         devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
     logger.info(f"Using devices: {devices}")
 
-    model_slug = model_name.split("/")[-1]
-    cache_dir = output_dir / f"{model_slug}-{num_samples}"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = cache_dir / "manifest.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "manifest.json"
 
     # Add file logging to the cache directory
-    log_file = cache_dir / "run.log"
+    log_file = output_dir / "run.log"
     file_logger_id = logger.add(log_file, rotation="10 MB", retention="7 days")
 
     # Load or create manifest
     manifest = load_manifest(manifest_path)
-    total_chunks = (num_samples + chunk_size - 1) // chunk_size
-    num_digits = int(np.log10(total_chunks)) + 1
+    num_digits = int(np.log10(
+        (end_idx + chunk_size - 1) // chunk_size
+    )) + 1
+    total_chunks = (end_idx - start_idx + chunk_size - 1) // chunk_size
 
     if manifest is not None:
         # Verify configuration matches
@@ -469,11 +476,11 @@ def cache_embedding_diffs_multi(
         manifest = {
             "model_name": model_name,
             "layers": layers,
-            "num_samples": num_samples,
             "chunk_size": chunk_size,
+            "end_idx": end_idx,
             "completed_chunks": [],
             "in_progress_chunks": [],
-            "total_chunks": total_chunks,
+            "unstarted_chunks": list(range(start_idx // chunk_size, end_idx // chunk_size)),
             "num_digits": num_digits,
         }
         save_manifest(manifest_path, manifest)
@@ -483,7 +490,7 @@ def cache_embedding_diffs_multi(
     if len(completed_chunks) == total_chunks:
         logger.info("All chunks already computed")
         logger.remove(file_logger_id)
-        return cache_dir
+        return output_dir
 
     # Spawn workers
     logger.info(f"Starting {len(devices)} GPU workers...")
@@ -502,7 +509,7 @@ def cache_embedding_diffs_multi(
                 layers,
                 batch_size,
                 chunk_size,
-                cache_dir,
+                output_dir,
                 lock,
                 enable_profiling,
             ),
@@ -524,9 +531,9 @@ def cache_embedding_diffs_multi(
         error_msg = "; ".join(f"device {d} exited with code {c}" for d, c in failed_devices)
         raise RuntimeError(f"Worker(s) failed: {error_msg}")
 
-    logger.success(f"All {total_chunks} chunks saved to {cache_dir}")
+    logger.success(f"All {total_chunks} chunks saved to {output_dir}")
     logger.remove(file_logger_id)
-    return cache_dir
+    return output_dir
 
 
 if __name__ == "__main__":
