@@ -1,9 +1,9 @@
-[submodule "open-instruct"]
-	path = open-instruct
-	url = https://github.com/chry-santhemum/open-instruct
 [submodule "persona_vectors"]
 	path = persona_vectors
 	url = https://github.com/chry-santhemum/persona_vectors
 [submodule "sycophancy_eval"]
 	path = sycophancy_eval
 	url = https://github.com/chry-santhemum/sycophancy-eval
+[submodule "open-instruct"]
+	path = open-instruct
+	url = https://github.com/chry-santhemum/open-instruct
