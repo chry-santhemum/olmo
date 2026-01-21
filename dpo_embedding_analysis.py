@@ -1,6 +1,7 @@
 # %% Imports and Configuration
 import contextlib
 import gc
+import math
 import inspect
 import json
 import multiprocessing as mp
@@ -402,39 +403,30 @@ def _gpu_worker(
 
 
 def cache_embedding_diffs_multi(
-    dataset: Dataset,
+    dataset_path: Path,
     model_name: str,
-    start_idx: int,
-    end_idx: int,
     layers: list[int],
     batch_size: int,
     chunk_size: int,
     output_dir: Path,
     devices: list[torch.device] | None = None,
     enable_profiling: bool = False,
-) -> Path:
+):
     """Cache DPO embedding diffs in chunks.
 
     Supports resuming from last completed chunk if interrupted.
 
     Args:
-        dataset: Must have "chosen" and "rejected" columns with full conversations
+        dataset_path: Path to dataset .jsonl file. 
+        Must have "chosen" and "rejected" columns with full conversations.
 
     Returns:
         Path to cache directory containing chunks and manifest
     """
 
-    assert start_idx % chunk_size == 0, f"start_idx {start_idx} must be divisible by chunk_size {chunk_size}"
-
-    if len(dataset) < end_idx:
-        logger.warning(f"Dataset length {len(dataset)} is less than end_idx {end_idx}. Setting end_idx to {len(dataset)}.")
-        end_idx = len(dataset)
-    else:
-        assert end_idx % chunk_size == 0, f"end_idx {end_idx} must be divisible by chunk_size {chunk_size}"
-    
-    if len(dataset) > end_idx:
-        logger.warning(f"Dataset length {len(dataset)} is greater than end_idx {end_idx}. Only evaluating first {end_idx} samples.")
-        dataset = dataset.select(range(end_idx))
+    dataset = load_dataset("json", data_files=dataset_path)["train"]
+    num_samples = len(dataset)
+    total_chunks = math.ceil(num_samples / chunk_size)
 
     # Auto-detect GPUs if not specified
     if devices is None:
@@ -449,48 +441,20 @@ def cache_embedding_diffs_multi(
     file_logger_id = logger.add(log_file, rotation="10 MB", retention="7 days")
 
     # Load or create manifest
-    manifest = load_manifest(manifest_path)
-    num_digits = int(np.log10(
-        (end_idx + chunk_size - 1) // chunk_size
-    )) + 1
-    total_chunks = (end_idx - start_idx + chunk_size - 1) // chunk_size
-
-    if manifest is not None:
-        # Verify configuration matches
-        if set(manifest["layers"]) != set(layers):
-            raise ValueError(f"layers mismatch: {manifest['layers']} vs {layers}")
-        if manifest["chunk_size"] != chunk_size:
-            raise ValueError(f"chunk_size mismatch: {manifest['chunk_size']} vs {chunk_size}")
-
-        completed_chunks = set(manifest["completed_chunks"])
-        logger.info(f"Resuming from manifest: {len(completed_chunks)}/{total_chunks} chunks completed")
-
-        # Reset any in_progress chunks from previous run
-        if manifest.get("in_progress_chunks"):
-            logger.warning(f"Resetting {len(manifest['in_progress_chunks'])} in_progress chunks")
-            manifest["in_progress_chunks"] = []
-            save_manifest(manifest_path, manifest)
-        
-    else:
-        completed_chunks = set()
-        manifest = {
-            "model_name": model_name,
-            "layers": layers,
-            "chunk_size": chunk_size,
-            "end_idx": end_idx,
-            "completed_chunks": [],
-            "in_progress_chunks": [],
-            "unstarted_chunks": list(range(start_idx // chunk_size, end_idx // chunk_size)),
-            "num_digits": num_digits,
-        }
-        save_manifest(manifest_path, manifest)
-        logger.info(f"Created new manifest for {total_chunks} chunks")
-
-    # Check if all chunks are complete
-    if len(completed_chunks) == total_chunks:
-        logger.info("All chunks already computed")
-        logger.remove(file_logger_id)
-        return output_dir
+    num_digits = int(np.log10(total_chunks)) + 1
+    manifest = {
+        "dataset_path": dataset_path,
+        "model_name": model_name,
+        "layers": layers,
+        "chunk_size": chunk_size,
+        "num_samples": num_samples,
+        "total_chunks": total_chunks,
+        "completed_chunks": [],
+        "in_progress_chunks": [],
+        "num_digits": num_digits,
+    }
+    save_manifest(manifest_path, manifest)
+    logger.info(f"Created new manifest for {total_chunks} chunks")
 
     # Spawn workers
     logger.info(f"Starting {len(devices)} GPU workers...")
@@ -533,7 +497,6 @@ def cache_embedding_diffs_multi(
 
     logger.success(f"All {total_chunks} chunks saved to {output_dir}")
     logger.remove(file_logger_id)
-    return output_dir
 
 
 if __name__ == "__main__":
@@ -545,26 +508,42 @@ if __name__ == "__main__":
             and ex["chosen"][0]["content"] is not None
             and ex["chosen"][-1]["role"] == "assistant"
             and ex["chosen"][-1]["content"] is not None
+            and ex["chosen"][-1]["content"] != ""
             and ex["rejected"] is not None
             and len(ex["rejected"]) >= 2
             and ex["rejected"][0]["content"] is not None
             and ex["rejected"][-1]["role"] == "assistant"
             and ex["rejected"][-1]["content"] is not None
+            and ex["rejected"][-1]["content"] != ""
+            and ex["chosen"][-1]["content"] != ex["rejected"][-1]["content"]
         ),
         num_proc=16,
     )
     dataset = dataset.shuffle(seed=42)
-    dataset = dataset.select(range(1024))
+    dataset = dataset.add_column("flipped", [False] * len(dataset))
+    # num_samples_kilo = round(len(dataset) / 1000)
 
+    dataset = dataset.select(range(16384))
+    Path("dpo_filter_data/16K-baseline").mkdir(parents=True, exist_ok=True)
+    dataset.to_json(f"dpo_filter_data/16K-baseline/dataset.jsonl")
 
+    model_name = "allenai/Olmo-3-7B-Instruct-SFT"
+    model_slug = model_name.split("/")[-1]
+    trait = "sycophantic"
+    LAYER = 23
+    chunk_size = 1024
+    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
+    feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
+
+    dataset_path = Path(f"dpo_filter_data/16K-baseline/dataset.jsonl")
+
+    # Compute cache for full dataset
+    logger.info(f"Caching embedding diffs for {model_name}...")
     cache_embedding_diffs_multi(
-        dataset=dataset,
-        model_name="allenai/Olmo-3-7B-Instruct-SFT",
-        num_samples=64,
-        layers=[23],
+        dataset_path=dataset_path,
+        model_name=model_name,
+        layers=[LAYER],
         batch_size=8,
-        chunk_size=32,
-        output_dir=Path("dpo_embedding_analysis"),
-        enable_profiling=True,
+        chunk_size=chunk_size,
+        output_dir=Path(f"dpo_embedding_analysis/{model_slug}-L{LAYER}-16K"),
     )
-

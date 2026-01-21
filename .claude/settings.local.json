@@ -5,6 +5,7 @@
       "Bash(source:*)",
       "Bash(curl:*)",
       "Bash(python3:*)",
+      "Bash(python3 <<:*)",
       "WebFetch(domain:inspect.aisi.org.uk)",
       "Bash(uv sync:*)",
       "Bash(uv venv:*)",
@@ -62,7 +63,14 @@
       "Bash(make quality:*)",
       "Bash(CUDA_VISIBLE_DEVICES=0,1,2 bash:*)",
       "Bash(cd:*)",
-      "Bash(git show:*)"
+      "Bash(git show:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git log:*)",
+      "Bash(git checkout:*)",
+      "Bash(git pull:*)",
+      "Bash(git rm:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

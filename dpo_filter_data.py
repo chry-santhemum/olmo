@@ -30,7 +30,6 @@ def filter_dataset(
     save_dir: Path,
     vector: Tensor,  # [hidden_dim]
     layer: int,
-    dataset: Dataset,
     top_pct: float | None = None,
     bottom_pct: float | None = None,
     action: Literal["prune", "flip"] = "prune",
@@ -54,6 +53,8 @@ def filter_dataset(
     manifest = load_manifest(cache_dir / "manifest.json")
     assert manifest is not None, "Manifest not found"
     total_chunks = manifest["total_chunks"]
+    dataset_path = manifest["dataset_path"]
+    dataset = load_dataset("json", data_files=dataset_path)["train"]
 
     # Stream chunks and compute similarities (only completed chunks)
     completed_chunks = sorted(manifest["completed_chunks"])
@@ -133,10 +134,7 @@ def filter_dataset(
     # Build filtered dataset from cache
     kept_set = set(kept_indices)
 
-    chosen_list = []
-    rejected_list = []
-    original_indices = []
-    flipped = []
+    chosen, rejected, cache_index, flipped = [], [], [], []
     n_flipped = 0
 
     logger.info(f"Building filtered dataset from {len(completed_chunks)} chunks...")
@@ -170,7 +168,7 @@ def filter_dataset(
     data_dict["chosen"] = chosen_list
     data_dict["rejected"] = rejected_list
     data_dict["flipped"] = flipped
-    data_dict["original_index"] = original_indices
+    data_dict["cache_index"] = cache_index
     filtered_dataset = Dataset.from_dict(data_dict)
     dataset_path = save_dir / "dataset.jsonl"
     filtered_dataset.to_json(dataset_path)
@@ -261,7 +259,6 @@ def main(
         cache_dir = cache_embedding_diffs_multi(
             dataset=dataset,
             model_name=model_name,
-            num_samples=num_samples,
             layers=[layer],
             batch_size=8,
             chunk_size=chunk_size,
@@ -290,139 +287,84 @@ def main(
 
 
 if __name__ == "__main__":
-    # model_name = "allenai/Olmo-3-7B-Instruct-SFT"
-    # model_slug = model_name.split("/")[-1]
-    # trait = "sycophantic"
-    # LAYER = 23
-    # num_samples = 32768
-    # chunk_size = 1024
-    # persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
-    # feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
 
-    dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train").filter(
-        lambda ex: (
-            ex["chosen"] is not None
-            and len(ex["chosen"]) >= 2
-            and ex["chosen"][0]["content"] is not None
-            and ex["chosen"][-1]["role"] == "assistant"
-            and ex["chosen"][-1]["content"] is not None
-            and ex["chosen"][-1]["content"] != ""
-            and ex["rejected"] is not None
-            and len(ex["rejected"]) >= 2
-            and ex["rejected"][0]["content"] is not None
-            and ex["rejected"][-1]["role"] == "assistant"
-            and ex["rejected"][-1]["content"] is not None
-            and ex["rejected"][-1]["content"] != ""
-            and ex["chosen"][-1]["content"] != ex["rejected"][-1]["content"]
-        ),
-        num_proc=16,
+    dataset_path = Path(f"dpo_filter_data/16K-baseline/dataset.jsonl")
+
+    main(
+        model_name=model_name,
+        vector=persona_vector,
+        layer=LAYER,
+        num_samples=512,
+        chunk_size=128,
+        top_pct=5.0,
+        action="prune",
+        method="cosine",
+        save_dir="dpo_filter_data/debug",
     )
-    dataset = dataset.shuffle(seed=42)
-    # dataset = dataset.select(range(32768, 102400))
-    dataset = dataset.add_column("flipped", [False] * len(dataset))
 
-    Path("dpo_filter_data/all").mkdir(parents=True, exist_ok=True)
-    num_samples_kilo = round(len(dataset) / 1000)
-    dataset.to_json(f"dpo_filter_data/{num_samples_kilo}K-baseline-all/dataset.jsonl")
-
-    # # Use existing cache if available, otherwise compute
-    # cache_dir = Path(f"dpo_embedding_analysis/{model_slug}-102400")
-    # if not cache_dir.exists():
-    #     logger.info(f"Caching embedding diffs for {model_name}...")
-    #     cache_dir = cache_embedding_diffs_multi(
-    #         dataset=dataset,
-    #         model_name=model_name,
-    #         num_samples=num_samples,
-    #         layers=[layer],
-    #         batch_size=8,
-    #         chunk_size=chunk_size,
-    #         output_dir=Path("dpo_embedding_analysis"),
-    #     )
-    # else:
-    #     logger.info(f"Using existing cache at {cache_dir}")
-
-
-    # dataset_path = "dpo_filter_data/102K-baseline/dataset.jsonl"
-    # Path(dataset_path).parent.mkdir(parents=True, exist_ok=True)
-    # dataset.to_json(dataset_path)
-    # logger.success(f"Saved filtered dataset with {len(dataset)} samples to {dataset_path}")
-
-
-    # main(
-    #     model_name=model_name,
-    #     vector=persona_vector,
-    #     layer=LAYER,
-    #     num_samples=512,
-    #     chunk_size=128,
-    #     top_pct=5.0,
-    #     action="prune",
-    #     method="cosine",
-    #     save_dir="dpo_filter_data/debug",
-    # )
-
-    # main(
-    #     model_name=model_name,
-    #     vector=persona_vector,
-    #     layer=LAYER,
-    #     dataset=dataset,
-    #     chunk_size=chunk_size,
-    #     top_pct=5.0,
-    #     action="prune",
-    #     method="cosine",
-    #     save_dir="dpo_filter_data/33K-persona-5.0pct-prune-cosine",
-    # )
-    # main(
-    #     model_name=model_name,
-    #     vector=persona_vector,
-    #     layer=LAYER,
-    #     dataset=dataset,
-    #     chunk_size=chunk_size,
-    #     top_pct=1.0,
-    #     action="prune",
-    #     method="cosine",
-    #     save_dir="dpo_filter_data/33K-persona-1.0pct-prune-cosine",
-    # )
-    # main(
-    #     model_name=model_name,
-    #     vector=persona_vector,
-    #     layer=LAYER,
-    #     dataset=dataset,
-    #     chunk_size=chunk_size,
-    #     top_pct=0.25,
-    #     action="prune",
-    #     method="cosine",
-    #     save_dir="dpo_filter_data/33K-persona-0.25pct-prune-cosine",
-    # )
-    # main(
-    #     model_name=model_name,
-    #     vector=persona_vector,
-    #     layer=LAYER,
-    #     dataset=dataset,
-    #     chunk_size=chunk_size,
-    #     top_pct=1.0,
-    #     action="flip",
-    #     method="cosine",
-    #     save_dir="dpo_filter_data/33K-persona-1.0pct-flip-cosine",
-    # )
-    # main(
-    #     model_name=model_name,
-    #     vector=feedback_syco_vector,
-    #     layer=LAYER,
-    #     dataset=dataset,
-    #     chunk_size=chunk_size,
-    #     top_pct=1.0,
-    #     action="prune",
-    #     method="cosine",
-    #     save_dir="dpo_filter_data/33K-feedback-1.0pct-prune-cosine",
-    # )
-    # main(
-    #     model_name=model_name,
-    #     vector=persona_vector,
-    #     layer=LAYER,
-    #     dataset=dataset,
-    #     chunk_size=chunk_size,
-    #     top_pct=1.0,
-    #     action="prune",
-    #     method="dot",
-    #     save_dir="dpo_filter_data/33K-persona-1.0pct-prune-dot",
-    # )
+    main(
+        model_name=model_name,
+        vector=persona_vector,
+        layer=LAYER,
+        dataset=dataset,
+        chunk_size=chunk_size,
+        top_pct=5.0,
+        action="prune",
+        method="cosine",
+        save_dir="dpo_filter_data/33K-persona-5.0pct-prune-cosine",
+    )
+    main(
+        model_name=model_name,
+        vector=persona_vector,
+        layer=LAYER,
+        dataset=dataset,
+        chunk_size=chunk_size,
+        top_pct=1.0,
+        action="prune",
+        method="cosine",
+        save_dir="dpo_filter_data/33K-persona-1.0pct-prune-cosine",
+    )
+    main(
+        model_name=model_name,
+        vector=persona_vector,
+        layer=LAYER,
+        dataset=dataset,
+        chunk_size=chunk_size,
+        top_pct=0.25,
+        action="prune",
+        method="cosine",
+        save_dir="dpo_filter_data/33K-persona-0.25pct-prune-cosine",
+    )
+    main(
+        model_name=model_name,
+        vector=persona_vector,
+        layer=LAYER,
+        dataset=dataset,
+        chunk_size=chunk_size,
+        top_pct=1.0,
+        action="flip",
+        method="cosine",
+        save_dir="dpo_filter_data/33K-persona-1.0pct-flip-cosine",
+    )
+    main(
+        model_name=model_name,
+        vector=feedback_syco_vector,
+        layer=LAYER,
+        dataset=dataset,
+        chunk_size=chunk_size,
+        top_pct=1.0,
+        action="prune",
+        method="cosine",
+        save_dir="dpo_filter_data/33K-feedback-1.0pct-prune-cosine",
+    )
+    main(
+        model_name=model_name,
+        vector=persona_vector,
+        layer=LAYER,
+        dataset=dataset,
+        chunk_size=chunk_size,
+        top_pct=1.0,
+        action="prune",
+        method="dot",
+        save_dir="dpo_filter_data/33K-persona-1.0pct-prune-dot",
+    )
