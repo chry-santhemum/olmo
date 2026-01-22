@@ -20,6 +20,8 @@ from torch.profiler import profile, ProfilerActivity, schedule
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
+NUM_PROC = 16
+
 def get_resid_block_name(model, layer: int) -> str:
     """Get the residual block module name for a given layer."""
     name = ""
@@ -292,6 +294,10 @@ def _gpu_worker(
     manifest_path = output_dir / "manifest.json"
     with open(manifest_path) as f:
         manifest = Manifest.model_validate_json(f.read())
+    
+    chunk_size = manifest.chunk_size
+    layers = manifest.layers
+    total_chunks = manifest.total_chunks
 
     torch.cuda.set_device(device)  # Set default device for this process
     logger.info(f"[Device {device}] Worker started.")
@@ -362,7 +368,7 @@ def _gpu_worker(
                 tokenizer,
                 chosen_chats=chosen,
                 rejected_chats=rejected,
-                layers=manifest.layers,
+                layers=layers,
                 batch_size=batch_size,
             )
 
@@ -374,7 +380,7 @@ def _gpu_worker(
                 "activation_diffs": activation_diffs,
                 **chunk_slice,
             }
-            num_digits = len(str(manifest.total_chunks - 1))
+            num_digits = len(str(total_chunks - 1))
             chunk_path = output_dir / f"chunk_{chunk_idx:0{num_digits}d}.pt"
 
             # Atomic save chunks
@@ -388,7 +394,7 @@ def _gpu_worker(
             if prof is not None:
                 prof.step()
 
-    logger.info(f"[Device {device}] Worker finished, processed {chunks_processed}/{manifest.total_chunks} chunks.")
+    logger.info(f"[Device {device}] Worker finished, processed {chunks_processed}/{total_chunks} chunks.")
 
 
 def cache_embedding_diffs_multi(
@@ -420,7 +426,7 @@ def cache_embedding_diffs_multi(
         Path to cache directory containing chunks and manifest
     """
 
-    dataset = load_dataset("json", data_files=dataset_path)["train"]
+    dataset = load_dataset("json", data_files=str(dataset_path), split="train", num_proc=NUM_PROC)
     if num_samples is None:
         num_samples = len(dataset)
     elif num_samples % chunk_size != 0:
@@ -522,27 +528,27 @@ def cache_embedding_diffs_multi(
 
 if __name__ == "__main__":
 
-    dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train").filter(
-        lambda ex: (
-            ex["chosen"] is not None
-            and len(ex["chosen"]) >= 2
-            and ex["chosen"][0]["content"] is not None
-            and ex["chosen"][-1]["role"] == "assistant"
-            and ex["chosen"][-1]["content"] is not None
-            and ex["chosen"][-1]["content"] != ""
-            and ex["rejected"] is not None
-            and len(ex["rejected"]) >= 2
-            and ex["rejected"][0]["content"] is not None
-            and ex["rejected"][-1]["role"] == "assistant"
-            and ex["rejected"][-1]["content"] is not None
-            and ex["rejected"][-1]["content"] != ""
-            and ex["chosen"][-1]["content"] != ex["rejected"][-1]["content"]
-        ),
-        num_proc=16,
-    )
-    dataset = dataset.shuffle(seed=42)
-    dataset = dataset.add_column("flipped", [False] * len(dataset))
-    dataset_path = Path(f"dpo_filter_data/257K-baseline-all/dataset.jsonl")
+    # dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train").filter(
+    #     lambda ex: (
+    #         ex["chosen"] is not None
+    #         and len(ex["chosen"]) >= 2
+    #         and ex["chosen"][0]["content"] is not None
+    #         and ex["chosen"][-1]["role"] == "assistant"
+    #         and ex["chosen"][-1]["content"] is not None
+    #         and ex["chosen"][-1]["content"] != ""
+    #         and ex["rejected"] is not None
+    #         and len(ex["rejected"]) >= 2
+    #         and ex["rejected"][0]["content"] is not None
+    #         and ex["rejected"][-1]["role"] == "assistant"
+    #         and ex["rejected"][-1]["content"] is not None
+    #         and ex["rejected"][-1]["content"] != ""
+    #         and ex["chosen"][-1]["content"] != ex["rejected"][-1]["content"]
+    #     ),
+    #     num_proc=NUM_PROC,
+    # )
+    # dataset = dataset.shuffle(seed=42)
+    # dataset = dataset.add_column("flipped", [False] * len(dataset))
+    dataset_path = Path("dpo_filter_data/257K-baseline-all/dataset.jsonl")
 
     model_name = "allenai/Olmo-3-7B-Instruct-SFT"
     model_slug = model_name.split("/")[-1]
@@ -557,7 +563,8 @@ if __name__ == "__main__":
         dataset_path=dataset_path,
         model_name=model_name,
         layers=[LAYER],
+        num_samples=num_samples,
         batch_size=8,
         chunk_size=chunk_size,
-        output_dir=Path(f"dpo_embedding_analysis/{model_slug}-L{LAYER}-16K"),
+        output_dir=Path(f"dpo_embedding_analysis/{model_slug}-L{LAYER}"),
     )
