@@ -10,16 +10,18 @@ from loguru import logger
 from torch import Tensor
 from tqdm import tqdm
 
-from dpo_embedding_analysis import cache_embedding_diffs_multi, load_manifest
+from dpo_embedding_analysis import cache_embedding_diffs_multi, Manifest
 from persona_vectors.eval.eval_persona import main as eval_persona_main
 from persona_vectors.generate_vec import save_persona_vector
 
 
 def load_chunk(cache_dir: Path, chunk_idx: int) -> dict:
     """Load a single chunk from the cache directory."""
-    manifest = load_manifest(cache_dir / "manifest.json")
-    assert manifest is not None, "Manifest not found"
-    chunk_path = cache_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
+    manifest_path = cache_dir / "manifest.json"
+    with open(manifest_path) as f:
+        manifest = Manifest.model_validate_json(f.read())
+    num_digits = len(str(manifest.total_chunks - 1))
+    chunk_path = cache_dir / f"chunk_{chunk_idx:0{num_digits}d}.pt"
     if not chunk_path.exists():
         raise FileNotFoundError(f"Chunk {chunk_idx} not found at {chunk_path}")
     return torch.load(chunk_path)
@@ -50,14 +52,15 @@ def filter_dataset(
     if print_percentiles is None:
         print_percentiles = [0, 1, 5, 10, 20, 80, 90, 95, 99, 100]
 
-    manifest = load_manifest(cache_dir / "manifest.json")
-    assert manifest is not None, "Manifest not found"
-    total_chunks = manifest["total_chunks"]
-    dataset_path = manifest["dataset_path"]
+    manifest_path = cache_dir / "manifest.json"
+    with open(manifest_path) as f:
+        manifest = Manifest.model_validate_json(f.read())
+    total_chunks = manifest.total_chunks
+    dataset_path = manifest.dataset_path
     dataset = load_dataset("json", data_files=dataset_path)["train"]
 
     # Stream chunks and compute similarities (only completed chunks)
-    completed_chunks = sorted(manifest["completed_chunks"])
+    completed_chunks = sorted(manifest.completed_chunks)
     similarities: dict[tuple[int, int], float] = {}
     logger.info(f"Computing {method} similarities across {len(completed_chunks)}/{total_chunks} completed chunks...")
 
@@ -147,40 +150,38 @@ def filter_dataset(
                 continue
             
             rejected_chat = chunk["rejected"][local_idx]
-            original_indices.append(start_idx + local_idx)
+            cache_index.append(start_idx + local_idx)
             if dataset["prompt_id"][start_idx + local_idx] != chunk["prompt_id"][local_idx]:
                 raise ValueError(f"Prompt ID mismatch at {start_idx + local_idx}")
 
             # Apply flip if needed
             if (chunk_idx, local_idx) in flip_indices:
-                chosen_list.append(rejected_chat)
-                rejected_list.append(chosen_chat)
+                chosen.append(rejected_chat)
+                rejected.append(chosen_chat)
                 flipped.append(True)
                 n_flipped += 1
             else:
-                chosen_list.append(chosen_chat)
-                rejected_list.append(rejected_chat)
+                chosen.append(chosen_chat)
+                rejected.append(rejected_chat)
                 flipped.append(False)
 
     # Save dataset as JSON
-    filtered_dataset = dataset.select(original_indices)
+    filtered_dataset = dataset.select(cache_index)
     data_dict = filtered_dataset.to_dict()
-    data_dict["chosen"] = chosen_list
-    data_dict["rejected"] = rejected_list
+    data_dict["chosen"] = chosen
+    data_dict["rejected"] = rejected
     data_dict["flipped"] = flipped
     data_dict["cache_index"] = cache_index
     filtered_dataset = Dataset.from_dict(data_dict)
-    dataset_path = save_dir / "dataset.jsonl"
-    filtered_dataset.to_json(dataset_path)
-    logger.success(f"Saved filtered dataset with {len(chosen_list)} samples ({n_flipped} flipped) to {dataset_path}")
+    output_path = save_dir / "dataset.jsonl"
+    filtered_dataset.to_json(output_path)
+    logger.success(f"Saved filtered dataset with {len(chosen)} samples ({n_flipped} flipped) to {output_path}")
 
     return filtered_dataset
 
 
 def _get_example_from_cache(cache_dir: Path, idx: tuple[int, int], similarity: float) -> dict:
     """Load a single example from the appropriate chunk."""
-    manifest = load_manifest(cache_dir / "manifest.json")
-    assert manifest is not None, "Manifest not found"
     chunk_idx, local_idx = idx
 
     chunk = load_chunk(cache_dir, chunk_idx)
@@ -240,8 +241,9 @@ def main(
     model_name: str,
     vector: Tensor,  # [hidden_size]
     layer: int,
-    dataset: Dataset,
+    dataset_path: Path,
     chunk_size: int,
+    num_samples: int | None = None,
     top_pct: float | None = None,
     bottom_pct: float | None = None,
     action: Literal["prune", "flip"] = "prune",
@@ -250,19 +252,19 @@ def main(
 ):
     """Run embedding analysis and optionally filter dataset."""
     model_slug = model_name.split("/")[-1]
-    num_samples = len(dataset)
 
     # Use existing cache if available, otherwise compute
-    cache_dir = Path(f"dpo_embedding_analysis/{model_slug}-{num_samples}")
+    cache_dir = Path(f"dpo_embedding_analysis/{model_slug}-L{layer}")
     if not cache_dir.exists():
         logger.info(f"Caching embedding diffs for {model_name}...")
-        cache_dir = cache_embedding_diffs_multi(
-            dataset=dataset,
+        cache_embedding_diffs_multi(
+            dataset_path=dataset_path,
             model_name=model_name,
             layers=[layer],
+            num_samples=num_samples,
             batch_size=8,
             chunk_size=chunk_size,
-            output_dir=Path("dpo_embedding_analysis"),
+            output_dir=cache_dir,
         )
     else:
         logger.info(f"Using existing cache at {cache_dir}")
@@ -278,7 +280,6 @@ def main(
         save_dir=save_dir,
         vector=vector,
         layer=layer,
-        dataset=dataset,
         top_pct=top_pct,
         bottom_pct=bottom_pct,
         action=action,
@@ -287,15 +288,22 @@ def main(
 
 
 if __name__ == "__main__":
+    model_name = "allenai/Olmo-3-7B-Instruct-SFT"
+    LAYER = 23
+    model_slug = model_name.split("/")[-1]
+    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
+    feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
+    chunk_size = 1024
 
-    dataset_path = Path(f"dpo_filter_data/16K-baseline/dataset.jsonl")
+    dataset_path = Path("dpo_filter_data/16K-baseline/dataset.jsonl")
 
     main(
         model_name=model_name,
         vector=persona_vector,
         layer=LAYER,
-        num_samples=512,
+        dataset_path=dataset_path,
         chunk_size=128,
+        num_samples=512,
         top_pct=5.0,
         action="prune",
         method="cosine",
@@ -306,7 +314,7 @@ if __name__ == "__main__":
         model_name=model_name,
         vector=persona_vector,
         layer=LAYER,
-        dataset=dataset,
+        dataset_path=dataset_path,
         chunk_size=chunk_size,
         top_pct=5.0,
         action="prune",
@@ -317,7 +325,7 @@ if __name__ == "__main__":
         model_name=model_name,
         vector=persona_vector,
         layer=LAYER,
-        dataset=dataset,
+        dataset_path=dataset_path,
         chunk_size=chunk_size,
         top_pct=1.0,
         action="prune",
@@ -328,7 +336,7 @@ if __name__ == "__main__":
         model_name=model_name,
         vector=persona_vector,
         layer=LAYER,
-        dataset=dataset,
+        dataset_path=dataset_path,
         chunk_size=chunk_size,
         top_pct=0.25,
         action="prune",
@@ -339,7 +347,7 @@ if __name__ == "__main__":
         model_name=model_name,
         vector=persona_vector,
         layer=LAYER,
-        dataset=dataset,
+        dataset_path=dataset_path,
         chunk_size=chunk_size,
         top_pct=1.0,
         action="flip",
@@ -350,7 +358,7 @@ if __name__ == "__main__":
         model_name=model_name,
         vector=feedback_syco_vector,
         layer=LAYER,
-        dataset=dataset,
+        dataset_path=dataset_path,
         chunk_size=chunk_size,
         top_pct=1.0,
         action="prune",
@@ -361,7 +369,7 @@ if __name__ == "__main__":
         model_name=model_name,
         vector=persona_vector,
         layer=LAYER,
-        dataset=dataset,
+        dataset_path=dataset_path,
         chunk_size=chunk_size,
         top_pct=1.0,
         action="prune",

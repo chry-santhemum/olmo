@@ -7,6 +7,7 @@ import json
 import multiprocessing as mp
 from functools import partial
 from pathlib import Path
+from pydantic import BaseModel
 from loguru import logger
 from tqdm import tqdm
 from datasets import load_dataset, Dataset
@@ -259,86 +260,70 @@ def compute_embedding_diffs(
 
 # %% Workers
 
-def load_manifest(path: Path) -> dict | None:
-    """Load manifest file from `path` if it exists, otherwise None."""
-    if path.exists():
-        with open(path) as f:
-            return json.load(f)
-    return None
-
-def save_manifest(path: Path, manifest: dict) -> None:
-    """Atomic save."""
+def atomic_save(path: Path, data: dict) -> None:
     tmp_path = path.with_suffix(".tmp")
     with open(tmp_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+        json.dump(data, f, indent=2)
     tmp_path.rename(path)
+
+
+
+class Manifest(BaseModel):
+    dataset_path: str
+    model_name: str
+    layers: list[int]
+    chunk_size: int
+    total_chunks: int
+    completed_chunks: list[int]
+    in_progress_chunks: list[int]
+    to_do_chunks: list[int]
+
 
 
 def _gpu_worker(
     device: torch.device,
     dataset: Dataset,
-    model_name: str,
-    layers: list[int],
     batch_size: int,
-    chunk_size: int,
     output_dir: Path,
     lock,
     enable_profiling: bool = False,
-) -> None:
+):
     """Worker function that processes chunks on a specific GPU."""
-    num_samples = len(dataset)
-    manifest = load_manifest(output_dir / "manifest.json")
-    assert manifest is not None, "Manifest not found"
-    if manifest["num_samples"] != num_samples:
-        raise ValueError(f"Dataset length {num_samples} does not match manifest num_samples {manifest['num_samples']}")
+    manifest_path = output_dir / "manifest.json"
+    with open(manifest_path) as f:
+        manifest = Manifest.model_validate_json(f.read())
 
     torch.cuda.set_device(device)  # Set default device for this process
-    logger.info(f"[Device {device}] Starting worker")
-    model = load_model(model_name, torch_dtype=torch.bfloat16).to(device)
-    tokenizer = load_tokenizer(model_name)
+    logger.info(f"[Device {device}] Worker started.")
+    model = load_model(manifest.model_name, torch_dtype=torch.bfloat16).to(device)
+    tokenizer = load_tokenizer(manifest.model_name)
+    logger.info(f"[Device {device}] Loaded model and tokenizer.")
 
-    def _claim_next_chunk(cache_dir: Path, lock) -> int | None:
+    def _claim_next_chunk(output_dir: Path, lock) -> int | None:
         """Atomically claim the next uncompleted chunk.
 
         Returns chunk index if one is available, None if all chunks are done or in progress.
         """
-        manifest_path = cache_dir / "manifest.json"
         with lock:
-            manifest = load_manifest(manifest_path)
-            if manifest is None:
-                raise RuntimeError("Manifest not found")
-
-            completed = set(manifest["completed_chunks"])
-            in_progress = set(manifest.get("in_progress_chunks", []))
-
-            for chunk_idx in range(manifest["total_chunks"]):
-                if chunk_idx not in completed.union(in_progress):
-                    manifest.setdefault("in_progress_chunks", []).append(chunk_idx)
-                    save_manifest(manifest_path, manifest)
+            with open(output_dir / "manifest.json") as f:
+                manifest = Manifest.model_validate_json(f.read())
+            occupied = manifest.completed_chunks + manifest.in_progress_chunks
+            for chunk_idx in manifest.to_do_chunks:
+                if chunk_idx not in occupied:
+                    manifest.in_progress_chunks.append(chunk_idx)
+                    manifest.to_do_chunks.remove(chunk_idx)
+                    atomic_save(output_dir / "manifest.json", manifest.model_dump())
                     return chunk_idx
             return None
-
-    def _mark_chunk_complete(cache_dir: Path, lock, chunk_idx: int) -> None:
+    
+    def _mark_chunk_complete(output_dir: Path, lock, chunk_idx: int) -> None:
         """Mark a chunk as completed and remove from in_progress."""
-        manifest_path = cache_dir / "manifest.json"
         with lock:
-            manifest = load_manifest(manifest_path)
-            if manifest is None:
-                raise RuntimeError("Manifest not found")
-
-            in_progress = manifest.get("in_progress_chunks", [])
-            if chunk_idx in in_progress:
-                in_progress.remove(chunk_idx)
-            else:
-                logger.warning(f"Chunk {chunk_idx} was not in_progress")
-            manifest["in_progress_chunks"] = in_progress
-
-            if chunk_idx not in manifest["completed_chunks"]:
-                manifest["completed_chunks"].append(chunk_idx)
-            else:
-                logger.warning(f"Chunk {chunk_idx} was already completed")
-
-            save_manifest(manifest_path, manifest)
+            with open(output_dir / "manifest.json") as f:
+                manifest = Manifest.model_validate_json(f.read())
+            manifest.in_progress_chunks.remove(chunk_idx)
+            manifest.completed_chunks.append(chunk_idx)
+            atomic_save(output_dir / "manifest.json", manifest.model_dump())
 
     if enable_profiling:
         profile_dir = output_dir / "profiles"
@@ -350,7 +335,7 @@ def _gpu_worker(
                 str(profile_dir / f"trace_device_{device.index}.json")
             ),
             record_shapes=True,
-            profile_memory=True,
+            profile_memory=False,
             with_stack=True,
         )
     else:
@@ -365,7 +350,7 @@ def _gpu_worker(
                 break
 
             start_idx = chunk_idx * chunk_size
-            end_idx = min(start_idx + chunk_size, num_samples)
+            end_idx = min(start_idx + chunk_size, len(dataset))
             logger.info(f"[Device {device}] Processing chunk {chunk_idx} ({start_idx} to {end_idx})")
 
             chunk_slice = dataset[start_idx:end_idx]
@@ -377,7 +362,7 @@ def _gpu_worker(
                 tokenizer,
                 chosen_chats=chosen,
                 rejected_chats=rejected,
-                layers=layers,
+                layers=manifest.layers,
                 batch_size=batch_size,
             )
 
@@ -389,23 +374,28 @@ def _gpu_worker(
                 "activation_diffs": activation_diffs,
                 **chunk_slice,
             }
-            chunk_path = output_dir / f"chunk_{chunk_idx:0{manifest['num_digits']}d}.pt"
+            num_digits = len(str(manifest.total_chunks - 1))
+            chunk_path = output_dir / f"chunk_{chunk_idx:0{num_digits}d}.pt"
+
+            # Atomic save chunks
             tmp_path = chunk_path.with_suffix(".tmp")
             torch.save(chunk_data, tmp_path)
             tmp_path.rename(chunk_path)
             _mark_chunk_complete(output_dir, lock, chunk_idx)
+
             chunks_processed += 1
             logger.info(f"[Device {device}] Completed chunk {chunk_idx}")
             if prof is not None:
                 prof.step()
 
-    logger.info(f"[Device {device}] Worker finished, processed {chunks_processed} chunks")
+    logger.info(f"[Device {device}] Worker finished, processed {chunks_processed}/{manifest.total_chunks} chunks.")
 
 
 def cache_embedding_diffs_multi(
     dataset_path: Path,
     model_name: str,
     layers: list[int],
+    num_samples: int|None,
     batch_size: int,
     chunk_size: int,
     output_dir: Path,
@@ -414,18 +404,28 @@ def cache_embedding_diffs_multi(
 ):
     """Cache DPO embedding diffs in chunks.
 
-    Supports resuming from last completed chunk if interrupted.
+    Resuming logic:
+      - based on num_samples, compute remaining chunks to do.
+        this includes both past uncompleted chunks and new chunks to do.
 
     Args:
         dataset_path: Path to dataset .jsonl file. 
         Must have "chosen" and "rejected" columns with full conversations.
+        NOTE: make sure that the dataset is already shuffled.
+
+        num_samples: The first N samples in the dataset to cache.
+        must be either None or divisible by chunk_size.
 
     Returns:
         Path to cache directory containing chunks and manifest
     """
 
     dataset = load_dataset("json", data_files=dataset_path)["train"]
-    num_samples = len(dataset)
+    if num_samples is None:
+        num_samples = len(dataset)
+    elif num_samples % chunk_size != 0:
+        raise ValueError(f"num_samples {num_samples} must be divisible by chunk_size {chunk_size}")
+
     total_chunks = math.ceil(num_samples / chunk_size)
 
     # Auto-detect GPUs if not specified
@@ -441,20 +441,44 @@ def cache_embedding_diffs_multi(
     file_logger_id = logger.add(log_file, rotation="10 MB", retention="7 days")
 
     # Load or create manifest
-    num_digits = int(np.log10(total_chunks)) + 1
-    manifest = {
-        "dataset_path": dataset_path,
-        "model_name": model_name,
-        "layers": layers,
-        "chunk_size": chunk_size,
-        "num_samples": num_samples,
-        "total_chunks": total_chunks,
-        "completed_chunks": [],
-        "in_progress_chunks": [],
-        "num_digits": num_digits,
-    }
-    save_manifest(manifest_path, manifest)
-    logger.info(f"Created new manifest for {total_chunks} chunks")
+    if manifest_path.exists():
+        with open(manifest_path) as f:
+            manifest = Manifest.model_validate_json(f.read())
+        
+        if (
+            manifest.dataset_path != str(dataset_path)
+            or manifest.model_name != model_name
+            or manifest.layers != layers
+            or manifest.chunk_size != chunk_size
+        ):
+            raise ValueError(
+                f"Manifest config does not match input arguments:\n"
+                f"    dataset_path: {manifest.dataset_path} vs {dataset_path}\n"
+                f"    model_name: {manifest.model_name} vs {model_name}\n"
+                f"    layers: {manifest.layers} vs {layers}\n"
+                f"    chunk_size: {manifest.chunk_size} vs {chunk_size}\n"        
+            )
+
+        # set correct progress
+        manifest.total_chunks = total_chunks
+        manifest.in_progress_chunks.clear()
+        manifest.to_do_chunks = [i for i in range(total_chunks) if i not in manifest.completed_chunks]
+        atomic_save(manifest_path, manifest.model_dump())
+        logger.info(f"Loaded previous manifest, {len(manifest.completed_chunks)}/{total_chunks} chunks already completed")
+    
+    else:
+        manifest = Manifest(
+            dataset_path=str(dataset_path),
+            model_name=model_name,
+            layers=layers,
+            chunk_size=chunk_size,
+            total_chunks=total_chunks,
+            completed_chunks=[],
+            in_progress_chunks=[],
+            to_do_chunks=[i for i in range(total_chunks)],
+        )
+        atomic_save(manifest_path, manifest.model_dump())
+        logger.info(f"Created new manifest for {total_chunks} chunks")
 
     # Spawn workers
     logger.info(f"Starting {len(devices)} GPU workers...")
@@ -469,10 +493,7 @@ def cache_embedding_diffs_multi(
             args=(
                 device,
                 dataset,
-                model_name,
-                layers,
                 batch_size,
-                chunk_size,
                 output_dir,
                 lock,
                 enable_profiling,
@@ -492,7 +513,7 @@ def cache_embedding_diffs_multi(
 
     if failed_devices:
         logger.remove(file_logger_id)
-        error_msg = "; ".join(f"device {d} exited with code {c}" for d, c in failed_devices)
+        error_msg = "; ".join(f"[Device {d}] exited with code {c}" for d, c in failed_devices)
         raise RuntimeError(f"Worker(s) failed: {error_msg}")
 
     logger.success(f"All {total_chunks} chunks saved to {output_dir}")
@@ -521,21 +542,14 @@ if __name__ == "__main__":
     )
     dataset = dataset.shuffle(seed=42)
     dataset = dataset.add_column("flipped", [False] * len(dataset))
-    # num_samples_kilo = round(len(dataset) / 1000)
-
-    dataset = dataset.select(range(16384))
-    Path("dpo_filter_data/16K-baseline").mkdir(parents=True, exist_ok=True)
-    dataset.to_json(f"dpo_filter_data/16K-baseline/dataset.jsonl")
+    dataset_path = Path(f"dpo_filter_data/257K-baseline-all/dataset.jsonl")
 
     model_name = "allenai/Olmo-3-7B-Instruct-SFT"
     model_slug = model_name.split("/")[-1]
     trait = "sycophantic"
     LAYER = 23
+    num_samples = 16384
     chunk_size = 1024
-    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
-    feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
-
-    dataset_path = Path(f"dpo_filter_data/16K-baseline/dataset.jsonl")
 
     # Compute cache for full dataset
     logger.info(f"Caching embedding diffs for {model_name}...")
