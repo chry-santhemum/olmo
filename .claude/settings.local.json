@@ -73,7 +73,8 @@
       "Bash(git rm:*)",
       "Bash(env)",
       "Bash(lsof:*)",
-      "Bash(ss:*)"
+      "Bash(ss:*)",
+      "Bash(for d in /workspace/olmo/dpo_filter_data/16K-persona-{50.0,20.0,10.0,5.0}pct-prune)"
     ]
   },
   "hooks": {
@@ -83,7 +84,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done; true"
+            "command": "timeout 2 sh -c 'for t in /dev/pts/*; do [ -w \"$t\" ] && printf \"\\a\" > \"$t\" 2>/dev/null; done' 2>/dev/null; true"
           }
         ]
       }
@@ -94,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "for t in /dev/pts/*; do [ -w \"$t\" ] && printf '\\a' > \"$t\" 2>/dev/null; done; true"
+            "command": "timeout 2 sh -c 'for t in /dev/pts/*; do [ -w \"$t\" ] && printf \"\\a\" > \"$t\" 2>/dev/null; done' 2>/dev/null; true"
           }
         ]
       }
