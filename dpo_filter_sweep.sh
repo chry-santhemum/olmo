@@ -4,35 +4,49 @@ set -euo pipefail
 cd /workspace/olmo
 source setup.sh
 
-# # Filter data with different prune percentages
+# Generate filtered datasets
 # python3 dpo_filter_data.py
 
-# train
 cd /workspace/olmo/open-instruct
 source ~/.venv/bin/activate
 uv sync --active
 
-DATASETS=(
-    # "/workspace/olmo/dpo_filter_data/33K-baseline/dataset.jsonl"
-    # "/workspace/olmo/dpo_filter_data/33K-persona-5.0pct-prune-cosine/dataset.jsonl"
-    # "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-prune-cosine/dataset.jsonl"
-    # "/workspace/olmo/dpo_filter_data/33K-persona-0.25pct-prune-cosine/dataset.jsonl"
-    # "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-flip-cosine/dataset.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-persona-1.0pct-prune-dot/dataset.jsonl"
-    "/workspace/olmo/dpo_filter_data/33K-feedback-1.0pct-prune-cosine/dataset.jsonl"
+# Baseline dataset (for generating reference logprobs cache)
+BASELINE_DIR="/workspace/olmo/dpo_filter_data/16K-baseline"
+
+# Filtered datasets to train
+FILTERED_DATASETS=(
+    "/workspace/olmo/dpo_filter_data/16K-persona-50.0pct-prune"
+    "/workspace/olmo/dpo_filter_data/16K-persona-20.0pct-prune"
+    "/workspace/olmo/dpo_filter_data/16K-persona-10.0pct-prune"
+    "/workspace/olmo/dpo_filter_data/16K-persona-5.0pct-prune"
+    "/workspace/olmo/dpo_filter_data/16K-persona-50.0pct-flip"
+    "/workspace/olmo/dpo_filter_data/16K-persona-20.0pct-flip"
+    "/workspace/olmo/dpo_filter_data/16K-persona-10.0pct-flip"
+    "/workspace/olmo/dpo_filter_data/16K-persona-5.0pct-flip"
 )
 
-for DATASET in "${DATASETS[@]}"; do
-    # Extract name for output dir (e.g., "33K-5pct" from path)
-    NAME=$(basename "$(dirname "$DATASET")")
-    OUTPUT_DIR="/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_${NAME}"
+LOG_DIR="/workspace/olmo/dpo_filter_sweep_logs"
+mkdir -p "$LOG_DIR"
 
-    LOG_FILE="/workspace/olmo/dpo_filter_sweep_logs/${NAME}.log"
-    mkdir -p /workspace/olmo/dpo_filter_sweep_logs
+train_dpo() {
+    local DATASET_DIR="$1"
+    local REFERENCE_CACHE="${2:-}"  # Optional: path to reference logprobs cache
+
+    local DATASET="${DATASET_DIR}/dataset.jsonl"
+    local NAME=$(basename "$DATASET_DIR")
+    local OUTPUT_DIR="/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_${NAME}"
+    local LOG_FILE="${LOG_DIR}/${NAME}.log"
 
     echo "Training with dataset: $DATASET"
     echo "Output dir: $OUTPUT_DIR"
     echo "Log file: $LOG_FILE"
+
+    local EXTRA_ARGS=()
+    if [[ -n "$REFERENCE_CACHE" ]]; then
+        EXTRA_ARGS+=("--reference_logprobs_cache_path=$REFERENCE_CACHE")
+        echo "Using reference cache: $REFERENCE_CACHE"
+    fi
 
     accelerate launch \
         --mixed_precision bf16 \
@@ -61,10 +75,30 @@ for DATASET in "${DATASETS[@]}"; do
         --gradient_checkpointing \
         --push_to_hub=false \
         --do_not_randomize_output_dir=true \
-        --reference_logprobs_cache_path="/workspace/olmo/dpo_filter_data/33K-baseline/reference_logprobs.pt" \
         --with_tracking=true \
         --wandb_project_name="olmo3" \
         --wandb_entity="atticusw" \
         --try_launch_beaker_eval_jobs=false \
+        "${EXTRA_ARGS[@]}" \
         2>&1 | tee "$LOG_FILE"
+}
+
+# Step 1: Train baseline (this computes and saves reference logprobs)
+echo "=== Step 1: Training baseline to generate reference logprobs cache ==="
+REFERENCE_LOGPROBS_CACHE_PATH="$BASELINE_DIR" train_dpo "$BASELINE_DIR"
+
+# Find the generated cache file (*.pt in baseline dir, excluding dataset files)
+REFERENCE_CACHE=$(find "$BASELINE_DIR" -maxdepth 1 -name "*.pt" -type f | head -1)
+if [[ -z "$REFERENCE_CACHE" ]]; then
+    echo "ERROR: No reference logprobs cache found in $BASELINE_DIR"
+    exit 1
+fi
+echo "Found reference cache: $REFERENCE_CACHE"
+
+# Step 2: Train filtered datasets using the baseline cache
+echo "=== Step 2: Training filtered datasets ==="
+for DATASET_DIR in "${FILTERED_DATASETS[@]}"; do
+    train_dpo "$DATASET_DIR" "$REFERENCE_CACHE"
 done
+
+echo "=== All training complete ==="

@@ -31,20 +31,38 @@ def load_chunk(cache_dir: Path, chunk_idx: int, manifest: Manifest) -> dict:
 def filter_dataset(
     cache_dir: Path,
     save_dir: Path,
-    vector: Tensor,  # [hidden_dim]
+    vector: Tensor | None,  # [hidden_dim], or None for baseline (no filtering)
     layer: int,
     top_pct: float | None = None,
     bottom_pct: float | None = None,
     action: Literal["prune", "flip"] = "prune",
     method: Literal["dot", "cosine"] = "cosine",
+    num_samples: int | None = None,
     print_percentiles: list[float] | None = None,
     print_num_examples: int = 10,
 ):
     """
-    Compute dot product between (chosen - rejected) activation diff and persona vector,
+    Compute similarity between (chosen - rejected) activation diff and persona vector,
     then filter or flip samples based on similarity.
 
-    Saves a HF Dataset with 'chosen', 'rejected', 'flipped', 'cache_index' columns to save_dir
+    Args:
+        cache_dir: Directory containing embedding cache chunks
+        save_dir: Output directory for filtered dataset
+        vector: Persona vector [hidden_dim], or None for baseline (no filtering)
+        layer: Which layer's activations to use
+        top_pct: Select top X% by similarity (for prune: remove these; for flip: flip these)
+        bottom_pct: Select bottom X% by similarity
+        action: "prune" removes selected samples, "flip" swaps their chosen/rejected
+        method: "dot" or "cosine" similarity
+        num_samples: Target dataset size (up/downsample to this). None keeps original size.
+        print_percentiles: Percentile buckets for example saving
+        print_num_examples: Number of examples per bucket
+
+    Saves:
+        - dataset.jsonl: HF Dataset with 'chosen', 'rejected', 'flipped', 'cache_index' columns
+        - metadata.json: Filter config and computed metrics (sum/mean cosine similarity)
+        - distribution.png: Histogram of similarities (if vector provided)
+        - examples.json: Example samples per percentile bucket (if vector provided)
     """
     if top_pct is not None and bottom_pct is not None:
         raise ValueError("top_pct and bottom_pct are mutually exclusive")
@@ -56,63 +74,90 @@ def filter_dataset(
     with open(manifest_path) as f:
         manifest = Manifest.model_validate_json(f.read())
     total_chunks = manifest.total_chunks
-
-    # Stream chunks and compute similarities
     completed_chunks = sorted(manifest.completed_chunks)
+
+    # Collect all sample indices and compute similarities if vector provided
+    all_indices: list[tuple[int, int]] = []
     similarities: dict[tuple[int, int], float] = {}
-    logger.info(f"Computing {method} similarities across {len(completed_chunks)}/{total_chunks} completed chunks...")
 
-    for chunk_idx in tqdm(completed_chunks, desc="Processing chunks"):
-        chunk = load_chunk(cache_dir, chunk_idx, manifest)
-        for local_idx, sample_diffs in enumerate(chunk["activation_diffs"]):
-            if layer not in sample_diffs:
-                raise ValueError(f"Layer {layer} not in sample_diffs")
-            diff = sample_diffs[layer].to(dtype=vector.dtype, device=vector.device, non_blocking=True)
-            if method == "dot":
-                sim = torch.dot(diff, vector).item()
-            else:  # cosine
-                sim = F.cosine_similarity(diff, vector, dim=0).item()
-            similarities[(chunk_idx, local_idx)] = sim
+    if vector is not None:
+        logger.info(f"Computing {method} similarities across {len(completed_chunks)}/{total_chunks} completed chunks...")
+        for chunk_idx in tqdm(completed_chunks, desc="Processing chunks"):
+            chunk = load_chunk(cache_dir, chunk_idx, manifest)
+            for local_idx, sample_diffs in enumerate(chunk["activation_diffs"]):
+                if layer not in sample_diffs:
+                    raise ValueError(f"Layer {layer} not in sample_diffs")
+                diff = sample_diffs[layer].to(dtype=vector.dtype, device=vector.device, non_blocking=True)
+                if method == "dot":
+                    sim = torch.dot(diff, vector).item()
+                else:  # cosine
+                    sim = F.cosine_similarity(diff, vector, dim=0).item()
+                all_indices.append((chunk_idx, local_idx))
+                similarities[(chunk_idx, local_idx)] = sim
+    else:
+        logger.info(f"No vector provided, collecting all samples from {len(completed_chunks)} chunks...")
+        for chunk_idx in tqdm(completed_chunks, desc="Collecting indices"):
+            chunk = load_chunk(cache_dir, chunk_idx, manifest)
+            for local_idx in range(len(chunk["chosen"])):
+                all_indices.append((chunk_idx, local_idx))
 
-    # Print distribution stats
-    n_available = len(similarities)
-    sim_arr = np.array(list(similarities.values()))
+    n_available = len(all_indices)
+    logger.info(f"Found {n_available} samples in cache")
 
     # Determine which samples are selected based on top_pct or bottom_pct
     selected_indices: set[tuple[int, int]] = set()
     cutoff: float | None = None
-    if top_pct is not None:
-        cutoff = np.percentile(sim_arr, 100 - top_pct)
-        selected_indices = {idx for idx, sim in similarities.items() if sim >= cutoff}
-        logger.info(f"Selected top {top_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
-    elif bottom_pct is not None:
-        cutoff = np.percentile(sim_arr, bottom_pct)
-        selected_indices = {idx for idx, sim in similarities.items() if sim <= cutoff}
-        logger.info(f"Selected bottom {bottom_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
+    sim_arr: np.ndarray | None = None
+
+    if vector is not None and (top_pct is not None or bottom_pct is not None):
+        sim_arr = np.array([similarities[idx] for idx in all_indices])
+        if top_pct is not None:
+            cutoff = float(np.percentile(sim_arr, 100 - top_pct))
+            selected_indices = {idx for idx in all_indices if similarities[idx] >= cutoff}
+            logger.info(f"Selected top {top_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
+        elif bottom_pct is not None:
+            cutoff = float(np.percentile(sim_arr, bottom_pct))
+            selected_indices = {idx for idx in all_indices if similarities[idx] <= cutoff}
+            logger.info(f"Selected bottom {bottom_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
 
     # Apply action to selected samples
     flip_indices: set[tuple[int, int]] = set()
     if action == "prune":
-        kept_indices = [idx for idx in similarities.keys() if idx not in selected_indices]
-        logger.info(f"Pruning {len(selected_indices)} samples, keeping {len(kept_indices)}/{n_available} ({100*len(kept_indices)/n_available:.1f}%)")
-    elif action == "flip":
-        kept_indices = list(similarities.keys())
+        kept_indices = [idx for idx in all_indices if idx not in selected_indices]
+        if selected_indices:
+            logger.info(f"Pruning {len(selected_indices)} samples, keeping {len(kept_indices)}/{n_available} ({100*len(kept_indices)/n_available:.1f}%)")
+    else:  # flip
+        kept_indices = list(all_indices)
         flip_indices = selected_indices
-        logger.info(f"Flipping {len(flip_indices)} samples (swapping chosen/rejected)")
+        if flip_indices:
+            logger.info(f"Flipping {len(flip_indices)} samples (swapping chosen/rejected)")
+
+    num_unique_samples = len(kept_indices)
+
+    # Apply up/downsampling to reach target num_samples
+    if num_samples is not None:
+        if len(kept_indices) > num_samples:
+            kept_indices = kept_indices[:num_samples]
+            logger.info(f"Downsampled from {num_unique_samples} to {num_samples}")
+        elif len(kept_indices) < num_samples:
+            original_len = len(kept_indices)
+            full_repeats = num_samples // original_len
+            remainder = num_samples % original_len
+            kept_indices = kept_indices * full_repeats + kept_indices[:remainder]
+            logger.info(f"Upsampled from {original_len} to {num_samples}")
 
     # Ensure save_dir exists
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save distribution figure and percentile examples
-    _save_distribution_figure(sim_arr, method, cutoff, save_dir / "distribution.png")
-    _save_percentile_examples(cache_dir, manifest, similarities, print_percentiles, print_num_examples, save_dir / "examples.json")
+    # Save distribution figure and percentile examples (only if vector provided)
+    if vector is not None and sim_arr is not None:
+        _save_distribution_figure(sim_arr, method, cutoff, save_dir / "distribution.png")
+        _save_percentile_examples(cache_dir, manifest, similarities, print_percentiles, print_num_examples, save_dir / "examples.json")
 
-    # Build filtered dataset from cache
+    # Build filtered dataset from cache - collect unique samples first
     kept_set = set(kept_indices)
-
-    chosen, rejected, cache_index, flipped = [], [], [], []
-    n_flipped = 0
+    sample_data: dict[tuple[int, int], dict] = {}
 
     logger.info(f"Building filtered dataset from {len(completed_chunks)} chunks...")
     for chunk_idx in tqdm(completed_chunks, desc="Collecting samples"):
@@ -120,36 +165,78 @@ def filter_dataset(
         start_idx = chunk["start_idx"]
 
         for local_idx, chosen_chat in enumerate(chunk["chosen"]):
-            if (chunk_idx, local_idx) not in kept_set:
+            idx = (chunk_idx, local_idx)
+            if idx not in kept_set:
                 continue
-            
-            rejected_chat = chunk["rejected"][local_idx]
-            cache_index.append(start_idx + local_idx)
-            if dataset["prompt_id"][start_idx + local_idx] != chunk["prompt_id"][local_idx]:
-                raise ValueError(f"Prompt ID mismatch at {start_idx + local_idx}")
 
-            # Apply flip if needed
-            if (chunk_idx, local_idx) in flip_indices:
-                chosen.append(rejected_chat)
-                rejected.append(chosen_chat)
-                flipped.append(True)
-                n_flipped += 1
+            rejected_chat = chunk["rejected"][local_idx]
+            is_flipped = idx in flip_indices
+
+            if is_flipped:
+                sample_data[idx] = {
+                    "chosen": rejected_chat,
+                    "rejected": chosen_chat,
+                    "flipped": True,
+                    "cache_index": start_idx + local_idx,
+                }
             else:
-                chosen.append(chosen_chat)
-                rejected.append(rejected_chat)
-                flipped.append(False)
+                sample_data[idx] = {
+                    "chosen": chosen_chat,
+                    "rejected": rejected_chat,
+                    "flipped": False,
+                    "cache_index": start_idx + local_idx,
+                }
+
+    # Build final dataset in order of kept_indices (handles duplicates for upsampling)
+    chosen, rejected, flipped, cache_index = [], [], [], []
+    for idx in kept_indices:
+        data = sample_data[idx]
+        chosen.append(data["chosen"])
+        rejected.append(data["rejected"])
+        flipped.append(data["flipped"])
+        cache_index.append(data["cache_index"])
+
+    # Compute metrics on FINAL dataset (after up/downsampling)
+    sum_cosine_sim = 0.0
+    if vector is not None:
+        for i, idx in enumerate(kept_indices):
+            sim = similarities[idx]
+            if flipped[i]:
+                sim = -sim  # Flipped samples contribute negatively
+            sum_cosine_sim += sim
+    mean_cosine_sim = sum_cosine_sim / len(kept_indices) if kept_indices else 0.0
+
+    # Save metadata
+    metadata = {
+        "filter_config": {
+            "top_pct": top_pct,
+            "bottom_pct": bottom_pct,
+            "action": action,
+            "method": method,
+            "layer": layer,
+            "num_samples_target": num_samples,
+        },
+        "sum_cosine_similarity": sum_cosine_sim,
+        "mean_cosine_similarity": mean_cosine_sim,
+        "num_samples": len(kept_indices),
+        "num_unique_samples": num_unique_samples,
+        "num_flipped": sum(flipped),
+    }
+    with open(save_dir / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info(f"Saved metadata to {save_dir / 'metadata.json'}")
 
     # Save dataset as JSON
-    filtered_dataset = dataset.select(cache_index)
-    data_dict = filtered_dataset.to_dict()
-    data_dict["chosen"] = chosen
-    data_dict["rejected"] = rejected
-    data_dict["flipped"] = flipped
-    data_dict["cache_index"] = cache_index
-    filtered_dataset = Dataset.from_dict(data_dict)
+    dataset = Dataset.from_dict({
+        "chosen": chosen,
+        "rejected": rejected,
+        "flipped": flipped,
+        "cache_index": cache_index,
+    })
     output_path = save_dir / "dataset.jsonl"
-    filtered_dataset.to_json(output_path)
-    logger.success(f"Saved filtered dataset with {len(chosen)} samples ({n_flipped} flipped) to {output_path}")
+    dataset.to_json(output_path)
+    logger.success(f"Saved filtered dataset with {len(chosen)} samples (sum_cos_sim={sum_cosine_sim:.2f}, mean={mean_cosine_sim:.4f}) to {output_path}")
+
 
 def _extract_example(chunk: dict, local_idx: int, similarity: float) -> dict:
     """Extract example data from a loaded chunk."""
@@ -158,9 +245,7 @@ def _extract_example(chunk: dict, local_idx: int, similarity: float) -> dict:
     return {
         "local_idx": local_idx,
         "similarity": similarity,
-        "chosen_prompt": chosen_chat[0]["content"],
-        "rejected_prompt": rejected_chat[0]["content"],
-        "prompts_match": chosen_chat[:-1] == rejected_chat[:-1],
+        "prompt": chosen_chat[0]["content"],
         "chosen_response": chosen_chat[-1]["content"],
         "rejected_response": rejected_chat[-1]["content"],
     }
@@ -282,18 +367,27 @@ if __name__ == "__main__":
     trait = "sycophantic"
     model_slug = model_name.split("/")[-1]
     persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
-    feedback_syco_vector = torch.load("sycophancy_eval/vectors/feedback_L23.pt")["vector"]
-    dataset_path = Path("dpo_filter_data/16K-baseline/dataset.jsonl")
     cache_dir = Path("dpo_embedding_analysis/Olmo-3-7B-Instruct-SFT-L23")
 
-    # Full runs
+    # Fixed dataset size for all experiments (enables fair comparison)
+    NUM_SAMPLES = 16384
+
+    # Sweep runs: all normalized to NUM_SAMPLES via up/downsampling
     RUNS = [
-        {"vector": persona_vector, "top_pct": 50.0, "action": "prune", "method": "cosine", "save_dir": "dpo_filter_data/16K-persona-50.0pct-prune"},
-        {"vector": persona_vector, "top_pct": 20.0, "action": "prune", "method": "cosine", "save_dir": "dpo_filter_data/16K-persona-20.0pct-prune"},
-        {"vector": persona_vector, "top_pct": 10.0, "action": "prune", "method": "cosine", "save_dir": "dpo_filter_data/16K-persona-10.0pct-prune"},
-        {"vector": persona_vector, "top_pct": 50.0, "action": "flip", "method": "cosine", "save_dir": "dpo_filter_data/16K-persona-50.0pct-flip"},
-        {"vector": persona_vector, "top_pct": 20.0, "action": "flip", "method": "cosine", "save_dir": "dpo_filter_data/16K-persona-20.0pct-flip"},
-        {"vector": persona_vector, "top_pct": 10.0, "action": "flip", "method": "cosine", "save_dir": "dpo_filter_data/16K-persona-10.0pct-flip"},
+        # Baseline (no filtering, just downsample to NUM_SAMPLES)
+        {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/16K-baseline"},
+        # Prune experiments (remove high-similarity samples)
+        {"vector": persona_vector, "top_pct": 50.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-50.0pct-prune"},
+        {"vector": persona_vector, "top_pct": 20.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-20.0pct-prune"},
+        {"vector": persona_vector, "top_pct": 10.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-10.0pct-prune"},
+        {"vector": persona_vector, "top_pct": 5.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-5.0pct-prune"},
+        {"vector": persona_vector, "top_pct": 2.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-2.0pct-prune"},
+        # Flip experiments (flip high-similarity samples)
+        {"vector": persona_vector, "top_pct": 50.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-50.0pct-flip"},
+        {"vector": persona_vector, "top_pct": 20.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-20.0pct-flip"},
+        {"vector": persona_vector, "top_pct": 10.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-10.0pct-flip"},
+        {"vector": persona_vector, "top_pct": 5.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-5.0pct-flip"},
+        {"vector": persona_vector, "top_pct": 2.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-2.0pct-flip"},
     ]
 
     for run in RUNS:
@@ -304,5 +398,6 @@ if __name__ == "__main__":
             layer=LAYER,
             top_pct=run["top_pct"],  # type: ignore
             action=run["action"],  # type: ignore
-            method=run["method"],  # type: ignore
+            method="cosine",
+            num_samples=NUM_SAMPLES,
         )

@@ -426,7 +426,7 @@ def cache_embedding_diffs_multi(
         Path to cache directory containing chunks and manifest
     """
 
-    dataset = load_dataset("json", data_files=str(dataset_path), split="train", num_proc=NUM_PROC)
+    dataset = load_dataset("json", data_files=str(dataset_path), split="train")  # cannot be parallelized
     if num_samples is None:
         num_samples = len(dataset)
     elif num_samples % chunk_size != 0:
@@ -554,7 +554,7 @@ if __name__ == "__main__":
     model_slug = model_name.split("/")[-1]
     trait = "sycophantic"
     LAYER = 23
-    num_samples = 16384
+    num_samples = 32768
     chunk_size = 1024
 
     # Compute cache for full dataset
