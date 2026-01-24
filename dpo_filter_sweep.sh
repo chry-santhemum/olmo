@@ -32,9 +32,9 @@ BASELINE_DIR="/workspace/olmo/dpo_filter_data/33K-baseline"
 # Split datasets into two groups
 if [[ "$GROUP" == "1" ]]; then
     FILTERED_DATASETS=(
-        "/workspace/olmo/dpo_filter_data/16K-persona-50.0pct-prune"
-        "/workspace/olmo/dpo_filter_data/16K-persona-20.0pct-prune"
-        "/workspace/olmo/dpo_filter_data/16K-persona-10.0pct-prune"
+        # "/workspace/olmo/dpo_filter_data/16K-persona-50.0pct-prune"
+        # "/workspace/olmo/dpo_filter_data/16K-persona-20.0pct-prune"
+        # "/workspace/olmo/dpo_filter_data/16K-persona-10.0pct-prune"
         "/workspace/olmo/dpo_filter_data/16K-persona-5.0pct-prune"
     )
 else
@@ -76,9 +76,9 @@ train_dpo() {
     accelerate launch \
         --mixed_precision bf16 \
         --num_machines 1 \
-        --num_processes 8 \
+        --num_processes 4 \
         --use_deepspeed \
-        --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
+        --deepspeed_config_file configs/ds_configs/stage3_offloading_accelerate.conf \
         open_instruct/dpo_tune_cache.py \
         --mixer_list "${DATASET}" "1.0" \
         --output_dir="$OUTPUT_DIR" \
@@ -87,7 +87,7 @@ train_dpo() {
         --tokenizer_name="allenai/Olmo-3-7B-Instruct-SFT" \
         --max_seq_length=16384 \
         --per_device_train_batch_size=1 \
-        --gradient_accumulation_steps=16 \
+        --gradient_accumulation_steps=32 \
         --learning_rate=1e-6 \
         --lr_scheduler_type=linear \
         --warmup_ratio=0.1 \
@@ -98,6 +98,8 @@ train_dpo() {
         --beta=5 \
         --use_flash_attn \
         --gradient_checkpointing \
+        --offload_optimizer \
+        --offload_param \
         --push_to_hub=false \
         --do_not_randomize_output_dir=true \
         --with_tracking=true \
@@ -110,18 +112,18 @@ train_dpo() {
 
 CACHE_PATTERN="$BASELINE_DIR/*.pt"
 
-if [[ "$GROUP" == "1" ]]; then
-    # Group 1: First generate reference logprobs cache only (no training)
-    echo "=== Group 1: Generating reference logprobs cache ==="
-    REFERENCE_LOGPROBS_CACHE_PATH="$BASELINE_DIR" train_dpo "$BASELINE_DIR" "" "cache_only"
-else
-    # Group 2: Wait for cache file to exist
-    echo "=== Group 2: Waiting for reference logprobs cache ==="
-    while ! ls $CACHE_PATTERN 1>/dev/null 2>&1; do
-        echo "Waiting for reference cache at $CACHE_PATTERN ..."
-        sleep 30
-    done
-fi
+# if [[ "$GROUP" == "1" ]]; then
+#     # Group 1: First generate reference logprobs cache only (no training)
+#     echo "=== Group 1: Generating reference logprobs cache ==="
+#     REFERENCE_LOGPROBS_CACHE_PATH="$BASELINE_DIR" train_dpo "$BASELINE_DIR" "" "cache_only"
+# else
+#     # Group 2: Wait for cache file to exist
+#     echo "=== Group 2: Waiting for reference logprobs cache ==="
+#     while ! ls $CACHE_PATTERN 1>/dev/null 2>&1; do
+#         echo "Waiting for reference cache at $CACHE_PATTERN ..."
+#         sleep 30
+#     done
+# fi
 
 # Find the cache file
 REFERENCE_CACHE=$(ls $CACHE_PATTERN 2>/dev/null | head -1)
