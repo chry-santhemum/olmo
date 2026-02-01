@@ -5,7 +5,7 @@
     "ghcr.io/devcontainers/features/node:1": {},
     "ghcr.io/devcontainers/features/python:1": {}
   },
-  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && curl -LsSf https://astral.sh/uv/install.sh | sh && cat .devcontainer/zshrc-extra >> ~/.zshrc",
+  "postCreateCommand": "sudo mkdir -p ~/.cache/claude && sudo chown -R vscode:vscode ~/.cache && curl -fsSL https://claude.ai/install.sh | bash && curl -LsSf https://astral.sh/uv/install.sh | sh && cat .devcontainer/zshrc-extra >> ~/.zshrc",
   "mounts": [
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
     "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly",
