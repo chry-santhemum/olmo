@@ -11,6 +11,12 @@
 - When an item becomes outdated, simply delete it. When you add new items to this file, make sure to look through old memory items and update or delete any outdated items.
 
 
+## File structure
+
+- We assume that there is a separate python virtual environment in `~/.venv-vllm`, because the `vllm` package is incompatible with the rest of the dependencies. Whenever we need to serve a model with VLLM, the workflow should be first activate that venv, serve the model, then activate the project environment again to run code in the project. See `serve_model.sh` as an example of how to serve a local model.
+
+
+
 ## Behavior
 
 - [2025-01-04] Doing it right > doing it fast. Never skip steps or take shortcuts.

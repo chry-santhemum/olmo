@@ -8,8 +8,10 @@
   "postCreateCommand": "sudo mkdir -p ~/.cache/claude && sudo chown -R vscode:vscode ~/.cache && curl -fsSL https://claude.ai/install.sh | bash && curl -LsSf https://astral.sh/uv/install.sh | sh && cat .devcontainer/zshrc-extra >> ~/.zshrc",
   "mounts": [
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
+    "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind",
     "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly",
     "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
-    "source=uv-cache,target=/home/vscode/.cache/uv,type=volume"
+    "source=uv-cache,target=/home/vscode/.cache/uv,type=volume",
+    "source=/Users/atticusw/MIT Dropbox/Atticus Wang/Files/Home/Projects/agent-tools,target=/agent-tools,type=bind,readonly"
   ]
 }
