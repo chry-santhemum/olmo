@@ -77,7 +77,8 @@
       "Bash(for d in /workspace/olmo/dpo_filter_data/16K-persona-{50.0,20.0,10.0,5.0}pct-prune)",
       "WebFetch(domain:docs.vllm.ai)",
       "Bash(git submodule status:*)",
-      "Bash(uv run ruff check:*)"
+      "Bash(uv run ruff check:*)",
+      "Bash(git diff:*)"
     ]
   },
   "hooks": {

@@ -80,26 +80,25 @@ def filter_dataset(
     all_indices: list[tuple[int, int]] = []
     similarities: dict[tuple[int, int], float] = {}
 
-    if vector is not None:
-        logger.info(f"Computing {method} similarities across {len(completed_chunks)}/{total_chunks} completed chunks...")
-        for chunk_idx in tqdm(completed_chunks, desc="Processing chunks"):
-            chunk = load_chunk(cache_dir, chunk_idx, manifest)
-            for local_idx, sample_diffs in enumerate(chunk["activation_diffs"]):
-                if layer not in sample_diffs:
-                    raise ValueError(f"Layer {layer} not in sample_diffs")
-                diff = sample_diffs[layer].to(dtype=vector.dtype, device=vector.device, non_blocking=True)
-                if method == "dot":
-                    sim = torch.dot(diff, vector).item()
-                else:  # cosine
-                    sim = F.cosine_similarity(diff, vector, dim=0).item()
-                all_indices.append((chunk_idx, local_idx))
-                similarities[(chunk_idx, local_idx)] = sim
-    else:
-        logger.info(f"No vector provided, collecting all samples from {len(completed_chunks)} chunks...")
-        for chunk_idx in tqdm(completed_chunks, desc="Collecting indices"):
-            chunk = load_chunk(cache_dir, chunk_idx, manifest)
-            for local_idx in range(len(chunk["chosen"])):
-                all_indices.append((chunk_idx, local_idx))
+    logger.info(f"Computing {method} similarities across {len(completed_chunks)}/{total_chunks} completed chunks...")
+    for chunk_idx in tqdm(completed_chunks, desc="Processing chunks"):
+        chunk = load_chunk(cache_dir, chunk_idx, manifest)
+        for local_idx, sample_diffs in enumerate(chunk["activation_diffs"]):
+            if layer not in sample_diffs:
+                raise ValueError(f"Layer {layer} not in sample_diffs")
+            diff = sample_diffs[layer].to(dtype=vector.dtype, device=vector.device, non_blocking=True)
+            if method == "dot":
+                sim = torch.dot(diff, vector).item()
+            else:  # cosine
+                sim = F.cosine_similarity(diff, vector, dim=0).item()
+            all_indices.append((chunk_idx, local_idx))
+            similarities[(chunk_idx, local_idx)] = sim
+    # else:
+    #     logger.info(f"No vector provided, collecting all samples from {len(completed_chunks)} chunks...")
+    #     for chunk_idx in tqdm(completed_chunks, desc="Collecting indices"):
+    #         chunk = load_chunk(cache_dir, chunk_idx, manifest)
+    #         for local_idx in range(len(chunk["chosen"])):
+    #             all_indices.append((chunk_idx, local_idx))
 
     n_available = len(all_indices)
     logger.info(f"Found {n_available} samples in cache")
@@ -109,7 +108,7 @@ def filter_dataset(
     cutoff: float | None = None
     sim_arr: np.ndarray | None = None
 
-    if vector is not None and (top_pct is not None or bottom_pct is not None):
+    if (top_pct is not None or bottom_pct is not None):
         sim_arr = np.array([similarities[idx] for idx in all_indices])
         if top_pct is not None:
             cutoff = float(np.percentile(sim_arr, 100 - top_pct))
@@ -151,7 +150,7 @@ def filter_dataset(
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # Save distribution figure and percentile examples (only if vector provided)
-    if vector is not None and sim_arr is not None:
+    if sim_arr is not None:
         _save_distribution_figure(sim_arr, method, cutoff, save_dir / "distribution.png")
         _save_percentile_examples(cache_dir, manifest, similarities, print_percentiles, print_num_examples, save_dir / "examples.json")
 
@@ -198,12 +197,11 @@ def filter_dataset(
 
     # Compute metrics on FINAL dataset (after up/downsampling)
     sum_cosine_sim = 0.0
-    if vector is not None:
-        for i, idx in enumerate(kept_indices):
-            sim = similarities[idx]
-            if flipped[i]:
-                sim = -sim  # Flipped samples contribute negatively
-            sum_cosine_sim += sim
+    for i, idx in enumerate(kept_indices):
+        sim = similarities[idx]
+        if flipped[i]:
+            sim = -sim  # Flipped samples contribute negatively
+        sum_cosine_sim += sim
     mean_cosine_sim = sum_cosine_sim / len(kept_indices) if kept_indices else 0.0
 
     # Save metadata
@@ -370,7 +368,7 @@ if __name__ == "__main__":
     cache_dir = Path("dpo_embedding_analysis/Olmo-3-7B-Instruct-SFT-L23")
 
     # Fixed dataset size for all experiments (enables fair comparison)
-    NUM_SAMPLES = 16384
+    # NUM_SAMPLES = 16384
 
     # # Sweep runs: all normalized to NUM_SAMPLES via up/downsampling
     # RUNS = [
@@ -404,22 +402,33 @@ if __name__ == "__main__":
 
     RUNS = [
         # Baseline (no filtering, just downsample to NUM_SAMPLES)
+        {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/16K-baseline"},
         {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/33K-baseline"},
-        # Prune experiments (remove high-similarity samples)
-        {"vector": persona_vector, "top_pct": 5.0, "action": "prune", "save_dir": "dpo_filter_data/33K-persona-5.0pct-prune"},
-        {"vector": persona_vector, "top_pct": 1.0, "action": "prune", "save_dir": "dpo_filter_data/33K-persona-1.0pct-prune"},
-        {"vector": persona_vector, "top_pct": 0.25, "action": "prune", "save_dir": "dpo_filter_data/33K-persona-0.5pct-prune"},
-        # Flip experiments (flip high-similarity samples)
-        {"vector": persona_vector, "top_pct": 1.0, "action": "flip", "save_dir": "dpo_filter_data/33K-persona-1.0pct-flip"},
+        # {"vector": persona_vector, "top_pct": 33.0, "action": "prune", "save_dir": "dpo_filter_data/33K-persona-33.0pct-prune"},
+        # {"vector": persona_vector, "top_pct": 15.0, "action": "prune", "save_dir": "dpo_filter_data/33K-persona-15.0pct-prune"},
+        # {"vector": persona_vector, "top_pct": 50.0, "action": "flip", "save_dir": "dpo_filter_data/33K-persona-50.0pct-flip"},
+        # {"vector": persona_vector, "top_pct": 33.0, "action": "flip", "save_dir": "dpo_filter_data/33K-persona-33.0pct-flip"},
+        # {"vector": persona_vector, "top_pct": 10.0, "action": "flip", "save_dir": "dpo_filter_data/33K-persona-10.0pct-flip"},
     ]
 
-    for run in RUNS:
-        filter_dataset(
-            cache_dir=cache_dir,
-            save_dir=Path(run["save_dir"]),  # type: ignore
-            vector=run["vector"],  # type: ignore
-            layer=LAYER,
-            top_pct=run["top_pct"],  # type: ignore
-            action=run["action"],  # type: ignore
-            method="cosine",
-        )
+    filter_dataset(
+        cache_dir=cache_dir,
+        save_dir=Path("dpo_filter_data/16K-all-flip"),  # type: ignore
+        vector=persona_vector,  # type: ignore
+        layer=LAYER,
+        top_pct=100.0,  # type: ignore
+        action="flip",  # type: ignore
+        method="cosine",
+        num_samples=16384,
+    )
+
+    filter_dataset(
+        cache_dir=cache_dir,
+        save_dir=Path("dpo_filter_data/33K-all-flip"),  # type: ignore
+        vector=persona_vector,  # type: ignore
+        layer=LAYER,
+        top_pct=100.0,  # type: ignore
+        action="flip",  # type: ignore
+        method="cosine",
+        num_samples=32768,
+    )
