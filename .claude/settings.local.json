@@ -104,5 +104,8 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "code-review@agent-tools": true
   }
 }

@@ -362,73 +362,57 @@ def get_persona_vectors(model: str, trait: str) -> Tensor:
 if __name__ == "__main__":
     model_name = "allenai/Olmo-3-7B-Instruct-SFT"
     LAYER = 23
-    trait = "sycophantic"
+    # trait = "sycophantic"
     model_slug = model_name.split("/")[-1]
-    persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
+    # persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
     cache_dir = Path("dpo_embedding_analysis/Olmo-3-7B-Instruct-SFT-L23")
+    vector = torch.load("sycophancy_eval/vectors/20260202_011515/contrast_L23.pt")["vector"]
 
     # Fixed dataset size for all experiments (enables fair comparison)
-    # NUM_SAMPLES = 16384
+    NUM_SAMPLES = 16384
 
-    # # Sweep runs: all normalized to NUM_SAMPLES via up/downsampling
-    # RUNS = [
-    #     # Baseline (no filtering, just downsample to NUM_SAMPLES)
-    #     {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/16K-baseline"},
-    #     # Prune experiments (remove high-similarity samples)
-    #     {"vector": persona_vector, "top_pct": 50.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-50.0pct-prune"},
-    #     {"vector": persona_vector, "top_pct": 20.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-20.0pct-prune"},
-    #     {"vector": persona_vector, "top_pct": 10.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-10.0pct-prune"},
-    #     {"vector": persona_vector, "top_pct": 5.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-5.0pct-prune"},
-    #     {"vector": persona_vector, "top_pct": 2.0, "action": "prune", "save_dir": "dpo_filter_data/16K-persona-2.0pct-prune"},
-    #     # Flip experiments (flip high-similarity samples)
-    #     {"vector": persona_vector, "top_pct": 50.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-50.0pct-flip"},
-    #     {"vector": persona_vector, "top_pct": 20.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-20.0pct-flip"},
-    #     {"vector": persona_vector, "top_pct": 10.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-10.0pct-flip"},
-    #     {"vector": persona_vector, "top_pct": 5.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-5.0pct-flip"},
-    #     {"vector": persona_vector, "top_pct": 2.0, "action": "flip", "save_dir": "dpo_filter_data/16K-persona-2.0pct-flip"},
-    # ]
+    # Sweep runs: all normalized to NUM_SAMPLES via up/downsampling
+    RUNS = [
+        # Baseline (no filtering, just downsample to NUM_SAMPLES)
+        # {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/16K-baseline"},
+        {"vector": vector, "top_pct": 50.0, "action": "prune", "save_dir": "dpo_filter_data/16K-feedback-50.0pct-prune"},
+        {"vector": vector, "top_pct": 20.0, "action": "prune", "save_dir": "dpo_filter_data/16K-feedback-20.0pct-prune"},
+        {"vector": vector, "top_pct": 5.0, "action": "prune", "save_dir": "dpo_filter_data/16K-feedback-5.0pct-prune"},
+        {"vector": vector, "top_pct": 50.0, "action": "flip", "save_dir": "dpo_filter_data/16K-feedback-50.0pct-flip"},
+        {"vector": vector, "top_pct": 20.0, "action": "flip", "save_dir": "dpo_filter_data/16K-feedback-20.0pct-flip"},
+        {"vector": vector, "top_pct": 5.0, "action": "flip", "save_dir": "dpo_filter_data/16K-feedback-5.0pct-flip"},
+    ]
 
-    # for run in RUNS:
-    #     filter_dataset(
-    #         cache_dir=cache_dir,
-    #         save_dir=Path(run["save_dir"]),  # type: ignore
-    #         vector=run["vector"],  # type: ignore
-    #         layer=LAYER,
-    #         top_pct=run["top_pct"],  # type: ignore
-    #         action=run["action"],  # type: ignore
-    #         method="cosine",
-    #         num_samples=NUM_SAMPLES,
-    #     )
+    for run in RUNS:
+        filter_dataset(
+            cache_dir=cache_dir,
+            save_dir=Path(run["save_dir"]),  # type: ignore
+            vector=run["vector"],  # type: ignore
+            layer=LAYER,
+            top_pct=run["top_pct"],  # type: ignore
+            action=run["action"],  # type: ignore
+            method="cosine",
+            num_samples=NUM_SAMPLES,
+        )
 
     RUNS = [
         # Baseline (no filtering, just downsample to NUM_SAMPLES)
-        {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/16K-baseline"},
-        {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/33K-baseline"},
-        # {"vector": persona_vector, "top_pct": 33.0, "action": "prune", "save_dir": "dpo_filter_data/33K-persona-33.0pct-prune"},
-        # {"vector": persona_vector, "top_pct": 15.0, "action": "prune", "save_dir": "dpo_filter_data/33K-persona-15.0pct-prune"},
-        # {"vector": persona_vector, "top_pct": 50.0, "action": "flip", "save_dir": "dpo_filter_data/33K-persona-50.0pct-flip"},
-        # {"vector": persona_vector, "top_pct": 33.0, "action": "flip", "save_dir": "dpo_filter_data/33K-persona-33.0pct-flip"},
-        # {"vector": persona_vector, "top_pct": 10.0, "action": "flip", "save_dir": "dpo_filter_data/33K-persona-10.0pct-flip"},
+        # {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/16K-baseline"},
+        # {"vector": None, "top_pct": None, "action": "prune", "save_dir": "dpo_filter_data/33K-baseline"},
+        {"vector": vector, "top_pct": 33.0, "action": "prune", "save_dir": "dpo_filter_data/33K-feedback-33.0pct-prune"},
+        {"vector": vector, "top_pct": 15.0, "action": "prune", "save_dir": "dpo_filter_data/33K-feedback-15.0pct-prune"},
+        {"vector": vector, "top_pct": 50.0, "action": "flip", "save_dir": "dpo_filter_data/33K-feedback-50.0pct-flip"},
+        {"vector": vector, "top_pct": 33.0, "action": "flip", "save_dir": "dpo_filter_data/33K-feedback-33.0pct-flip"},
+        {"vector": vector, "top_pct": 10.0, "action": "flip", "save_dir": "dpo_filter_data/33K-feedback-10.0pct-flip"},
     ]
 
-    filter_dataset(
-        cache_dir=cache_dir,
-        save_dir=Path("dpo_filter_data/16K-all-flip"),  # type: ignore
-        vector=persona_vector,  # type: ignore
-        layer=LAYER,
-        top_pct=100.0,  # type: ignore
-        action="flip",  # type: ignore
-        method="cosine",
-        num_samples=16384,
-    )
-
-    filter_dataset(
-        cache_dir=cache_dir,
-        save_dir=Path("dpo_filter_data/33K-all-flip"),  # type: ignore
-        vector=persona_vector,  # type: ignore
-        layer=LAYER,
-        top_pct=100.0,  # type: ignore
-        action="flip",  # type: ignore
-        method="cosine",
-        num_samples=32768,
-    )
+    for run in RUNS:
+        filter_dataset(
+            cache_dir=cache_dir,
+            save_dir=Path(run["save_dir"]),  # type: ignore
+            vector=run["vector"],  # type: ignore
+            layer=LAYER,
+            top_pct=run["top_pct"],  # type: ignore
+            action=run["action"],  # type: ignore
+            method="cosine",
+        )

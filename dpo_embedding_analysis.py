@@ -192,12 +192,11 @@ def compute_embedding_diffs(
         inputs = {k: v.to(device, non_blocking=True) for k, v in inputs.items()}
 
         response_starts = [
-            tokenizer.apply_chat_template(
+            len(tokenizer.apply_chat_template(
                 chat[:-1],
                 tokenize=True,
-                return_tensors="pt",
                 add_generation_prompt=True
-            ).shape[-1] 
+            ))
             for chat in all_chats
         ]
         response_lengths = [
