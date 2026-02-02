@@ -54,7 +54,7 @@
 
 - [2026-01-19] Keep argparse compact: one `add_argument` call per line, no help strings for obvious arguments.
 
-- [2026-02-01] Use relevant skills when it is applicable.
+- [2026-02-01] Always run the code-review skill (`/commit`) before any git commit. Never skip this step.
 
 
 ## Naming & comments
