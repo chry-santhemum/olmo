@@ -78,7 +78,9 @@
       "WebFetch(domain:docs.vllm.ai)",
       "Bash(git submodule status:*)",
       "Bash(uv run ruff check:*)",
-      "Bash(git diff:*)"
+      "Bash(git diff:*)",
+      "Bash(while read dir)",
+      "Bash(do ls -la \"$dir\")"
     ]
   },
   "hooks": {
