@@ -7,3 +7,4 @@
 [submodule "open-instruct"]
 	path = open-instruct
 	url = https://github.com/chry-santhemum/open-instruct
+	branch = atticus
