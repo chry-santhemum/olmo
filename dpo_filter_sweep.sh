@@ -5,11 +5,6 @@ cd /workspace/olmo/open-instruct
 source ~/.venv/bin/activate
 uv sync --active
 
-FILTERED_DATASETS=(
-    "/workspace/olmo/dpo_filter_data/16K-all-flip"
-    "/workspace/olmo/dpo_filter_data/33K-all-flip"
-)
-
 LOG_DIR="/workspace/olmo/dpo_filter_sweep_logs"
 mkdir -p "$LOG_DIR"
 
@@ -40,7 +35,7 @@ train_dpo() {
     accelerate launch \
         --mixed_precision bf16 \
         --num_machines 1 \
-        --num_processes 4 \
+        --num_processes 8 \
         --use_deepspeed \
         --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
         open_instruct/dpo_tune_cache.py \
@@ -51,7 +46,7 @@ train_dpo() {
         --tokenizer_name="allenai/Olmo-3-7B-Instruct-SFT" \
         --max_seq_length=16384 \
         --per_device_train_batch_size=1 \
-        --gradient_accumulation_steps=32 \
+        --gradient_accumulation_steps=16 \
         --learning_rate=1e-6 \
         --lr_scheduler_type=linear \
         --warmup_ratio=0.1 \
@@ -72,8 +67,18 @@ train_dpo() {
         2>&1 | tee "$LOG_FILE"
 }
 
-# Train filtered datasets using the cache
-train_dpo "/workspace/olmo/dpo_filter_data/16K-all-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+# 16K filtered datasets
+train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
 
-train_dpo "/workspace/olmo/dpo_filter_data/33K-all-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+# 33K filtered datasets
+train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-10.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-15.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
 
