@@ -12,6 +12,7 @@ wheels/
 
 # Secrets
 .env
+hf_upload.py
 
 # Files
 logs/
