@@ -1,4 +1,4 @@
-# %% Imports and Configuration
+# %%
 import contextlib
 import gc
 import math

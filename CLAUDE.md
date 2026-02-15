@@ -83,6 +83,8 @@
 ## Debugging
 - [2025-01-04] Always find the root cause. Never fix symptoms or add workarounds.
 
+- [2026-02-15] Never fail silently. Always log failure counts and summaries so problems are visible (e.g., "X succeeded, Y failed out of Z total").
+
 
 
 ## Environment
