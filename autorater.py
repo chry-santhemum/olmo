@@ -128,7 +128,7 @@ async def rate_dataset(dataset: list[dict]) -> list[dict]:
     return dataset
 
 
-def print_autorater_stats(dataset: list[dict], max_display_len=2048, examples_per_category=5):
+def print_autorater_stats(dataset: list[dict], max_display_len=10, examples_per_category=5):
     from collections import Counter
 
     scores = [item.get("autorater_score") for item in dataset]
@@ -165,6 +165,22 @@ def print_autorater_stats(dataset: list[dict], max_display_len=2048, examples_pe
             print(f"    Rejected: {truncate(processed['rejected'])}")
 
 
+
+def filter_and_save(path: str, threshold: int) -> list[dict]:
+    with open(path, "r") as f:
+        dataset = [json.loads(line) for line in f]
+
+    filtered = [item for item in dataset if (item.get("autorater_score") or 0) > threshold]
+    print(f"Filtered: {len(filtered)} kept out of {len(dataset)} (threshold > {threshold})")
+
+    out_path = path.replace(".jsonl", f"_filtered_{threshold}.jsonl")
+    with open(out_path, "w") as f:
+        for item in filtered:
+            f.write(json.dumps(item) + "\n")
+    print(f"Saved to {out_path}")
+    return filtered
+
+
 # %%
 
 DATASET_PATH = "dpo_filter_data/16K-baseline/dataset.jsonl"
@@ -174,14 +190,15 @@ with open(DATASET_PATH, "r") as f:
 
 OUTPUT_PATH = DATASET_PATH.replace("dataset.jsonl", "dataset_autorated.jsonl")
 
-asyncio.run(rate_dataset(dataset))
+# asyncio.run(rate_dataset(dataset))
 
-with open(OUTPUT_PATH, "w") as f:
-    for item in dataset:
-        f.write(json.dumps(item) + "\n")
-print(f"Saved {len(dataset)} rated items to {OUTPUT_PATH}")
+# with open(OUTPUT_PATH, "w") as f:
+#     for item in dataset:
+#         f.write(json.dumps(item) + "\n")
+# print(f"Saved {len(dataset)} rated items to {OUTPUT_PATH}")
 
 # %% Run stats on already-rated output
 # with open(OUTPUT_PATH, "r") as f:
 #     rated_data = [json.loads(line) for line in f]
-# print_autorater_stats(rated_data)
+
+filter_and_save(OUTPUT_PATH, threshold=2)

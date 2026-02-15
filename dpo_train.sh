@@ -5,7 +5,7 @@ cd /workspace/olmo/open-instruct
 source ~/.venv/bin/activate
 uv sync --active
 
-LOG_DIR="/workspace/olmo/dpo_filter_sweep_logs"
+LOG_DIR="/workspace/olmo/dpo_logs"
 mkdir -p "$LOG_DIR"
 
 train_dpo() {
@@ -67,18 +67,23 @@ train_dpo() {
         2>&1 | tee "$LOG_FILE"
 }
 
-# 16K filtered datasets
-train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
 
-# 33K filtered datasets
-train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-10.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-15.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+train_dpo "dpo_filter_data/16K-baseline/dataset_autorated_filtered_1.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "dpo_filter_data/16K-baseline/dataset_autorated_filtered_2.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+
+
+# # 16K filtered datasets
+# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+
+# # 33K filtered datasets
+# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-10.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-15.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
 
