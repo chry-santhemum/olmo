@@ -30,3 +30,4 @@ sycophancy_eval/results/
 sycophancy_eval/datasets/
 eval_persona_extract/
 dpo_train_profile/
+dpo_logs/

@@ -9,12 +9,12 @@ LOG_DIR="/workspace/olmo/dpo_logs"
 mkdir -p "$LOG_DIR"
 
 train_dpo() {
-    local DATASET_DIR="$1"
+    local DATASET_PATH="$1"
     local REFERENCE_CACHE="${2:-}"  # Optional: path to reference logprobs cache
     local CACHE_ONLY="${3:-}"       # Optional: if set, only cache reference logprobs
 
-    local DATASET="${DATASET_DIR}/dataset.jsonl"
-    local NAME=$(basename "$DATASET_DIR")
+    local DATASET=$DATASET_PATH
+    local NAME=$(basename "$DATASET_PATH")
     local OUTPUT_DIR="/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_${NAME}"
     local LOG_FILE="${LOG_DIR}/${NAME}.log"
 
@@ -68,22 +68,11 @@ train_dpo() {
 }
 
 
-train_dpo "dpo_filter_data/16K-baseline/dataset_autorated_filtered_1.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-train_dpo "dpo_filter_data/16K-baseline/dataset_autorated_filtered_2.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/16K-baseline/dataset_autorated_filtered_1.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
+train_dpo "/workspace/olmo/dpo_filter_data/16K-baseline/dataset_autorated_filtered_2.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
 
 
 # # 16K filtered datasets
-# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-5.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-50.0pct-prune" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-
+# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-flip/dataset.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
 # # 33K filtered datasets
-# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-10.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-15.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-33.0pct-prune" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-50.0pct-flip" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
-
+# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-10.0pct-flip/dataset.jsonl" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
