@@ -1,6 +1,3 @@
-"""Uses a cheap LLM autorater to rate each DPO pair."""
-
-# %%
 import os
 import dotenv
 import asyncio

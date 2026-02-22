@@ -20,7 +20,7 @@ from loguru import logger
 from openai import OpenAI
 from tqdm import tqdm
 
-from dpo_embedding_analysis import (
+from dpo_emb_cache import (
     compute_embedding_diffs,
     load_model,
     load_tokenizer,

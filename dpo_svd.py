@@ -25,7 +25,7 @@ from jaxtyping import Float
 from loguru import logger
 from torch import Tensor
 
-from dpo_embedding_analysis import (
+from dpo_emb_cache import (
     load_model,
     load_tokenizer,
     extract_prompt_and_response,

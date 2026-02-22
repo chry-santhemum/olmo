@@ -6,7 +6,7 @@ from jaxtyping import Float, Int
 
 import torch
 from torch import nn, Tensor
-from dpo_embedding_analysis import find_executable_batch_size
+from dpo_emb_cache import find_executable_batch_size
 
 def get_module(model, module_name: str) -> nn.Module:
     module = model

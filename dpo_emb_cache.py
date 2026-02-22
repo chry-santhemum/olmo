@@ -565,5 +565,5 @@ if __name__ == "__main__":
         num_samples=num_samples,
         batch_size=8,
         chunk_size=chunk_size,
-        output_dir=Path(f"dpo_embedding_analysis/{model_slug}-L{LAYER}"),
+        output_dir=Path(f"dpo_emb_cache/{model_slug}-L{LAYER}"),
     )

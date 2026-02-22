@@ -12,10 +12,14 @@ from loguru import logger
 from torch import Tensor
 from tqdm import tqdm
 
-from dpo_embedding_analysis import cache_embedding_diffs_multi, Manifest
+from dpo_emb_cache import cache_embedding_diffs_multi, Manifest
 from persona_vectors.eval.eval_persona import main as eval_persona_main
 from persona_vectors.generate_vec import save_persona_vector
 
+
+class FilteredDataset:
+    original_path: str
+    items: dict[int, str]
 
 
 NUM_PROC = 16
@@ -365,7 +369,7 @@ if __name__ == "__main__":
     # trait = "sycophantic"
     model_slug = model_name.split("/")[-1]
     # persona_vector = torch.load(f"persona_vectors/{model_slug}/{trait}_response_avg_diff.pt")[LAYER + 1]  # offset by 1
-    cache_dir = Path("dpo_embedding_analysis/Olmo-3-7B-Instruct-SFT-L23")
+    cache_dir = Path("dpo_emb_cache/Olmo-3-7B-Instruct-SFT-L23")
     vector = torch.load("sycophancy_eval/vectors/20260202_011515/contrast_L23.pt")["vector"]
 
     # Fixed dataset size for all experiments (enables fair comparison)
