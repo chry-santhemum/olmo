@@ -526,28 +526,7 @@ def cache_embedding_diffs_multi(
 
 
 if __name__ == "__main__":
-
-    # dataset = load_dataset("allenai/Dolci-Instruct-DPO", split="train").filter(
-    #     lambda ex: (
-    #         ex["chosen"] is not None
-    #         and len(ex["chosen"]) >= 2
-    #         and ex["chosen"][0]["content"] is not None
-    #         and ex["chosen"][-1]["role"] == "assistant"
-    #         and ex["chosen"][-1]["content"] is not None
-    #         and ex["chosen"][-1]["content"] != ""
-    #         and ex["rejected"] is not None
-    #         and len(ex["rejected"]) >= 2
-    #         and ex["rejected"][0]["content"] is not None
-    #         and ex["rejected"][-1]["role"] == "assistant"
-    #         and ex["rejected"][-1]["content"] is not None
-    #         and ex["rejected"][-1]["content"] != ""
-    #         and ex["chosen"][-1]["content"] != ex["rejected"][-1]["content"]
-    #     ),
-    #     num_proc=NUM_PROC,
-    # )
-    # dataset = dataset.shuffle(seed=42)
-    # dataset = dataset.add_column("flipped", [False] * len(dataset))
-    dataset_path = Path("dpo_filter_data/257K-baseline-all/dataset.jsonl")
+    dataset_path = Path("filtered/257K-baseline-all/dataset.jsonl")
 
     model_name = "allenai/Olmo-3-7B-Instruct-SFT"
     model_slug = model_name.split("/")[-1]

@@ -9,12 +9,16 @@ LOG_DIR="/workspace/olmo/dpo_logs"
 mkdir -p "$LOG_DIR"
 
 train_dpo() {
-    local DATASET_PATH="$1"
+    local DATASET_MASK_PATH="$1"
     local REFERENCE_CACHE="${2:-}"  # Optional: path to reference logprobs cache
     local CACHE_ONLY="${3:-}"       # Optional: if set, only cache reference logprobs
 
-    local DATASET=$DATASET_PATH
-    local NAME=$(basename "$DATASET_PATH")
+    # Realise dataset from mask into the mask's directory
+    local MASK_DIR
+    MASK_DIR=$(dirname "$DATASET_MASK_PATH")
+    python /workspace/olmo/realise_dataset.py "$DATASET_MASK_PATH" --output-dir "$MASK_DIR"
+    local DATASET="${MASK_DIR}/dataset.jsonl"
+    local NAME=$(basename "$MASK_DIR")
     local OUTPUT_DIR="/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_${NAME}"
     local LOG_FILE="${LOG_DIR}/${NAME}.log"
 
