@@ -29,3 +29,6 @@ dependencies = [
     "transformers>=4.40.0",
     "wandb>=0.23.1",
 ]
+
+[tool.pyright]
+ignore = ["**"]
