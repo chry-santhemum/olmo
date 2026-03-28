@@ -24,6 +24,7 @@ dependencies = [
     "pandas>=2.0.0",
     "peft>=0.18.1",
     "scipy>=1.12.0",
+    "sycophancy-eval",
     "torch>=2.0.0",
     "tqdm>=4.66.0",
     "transformers>=4.40.0",
@@ -32,3 +33,11 @@ dependencies = [
 
 [tool.pyright]
 ignore = ["**"]
+
+[tool.uv.workspace]
+members = [
+    "sycophancy_eval",
+]
+
+[tool.uv.sources]
+sycophancy-eval = { workspace = true, editable = true }
