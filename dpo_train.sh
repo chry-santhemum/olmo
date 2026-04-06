@@ -8,21 +8,31 @@ uv sync --active
 LOG_DIR="/workspace/olmo/dpo_logs"
 mkdir -p "$LOG_DIR"
 
-train_dpo() {
-    local DATASET_MASK_PATH="$1"
-    local REFERENCE_CACHE="${2:-}"  # Optional: path to reference logprobs cache
-    local CACHE_ONLY="${3:-}"       # Optional: if set, only cache reference logprobs
+# Edit these and rerun. Each dataset is trained sequentially.
+REFERENCE_CACHE="/workspace/olmo/dpo_checkpoints/reference_logprobs_cache/b73b20be1afcedff.pt"
+DATASETS=(
+    "/workspace/olmo/filtered/8K-baseline"
+)
 
-    # Realise dataset from mask into the mask's directory
-    local MASK_DIR
-    MASK_DIR=$(dirname "$DATASET_MASK_PATH")
-    python /workspace/olmo/realise_dataset.py "$DATASET_MASK_PATH" --output-dir "$MASK_DIR"
-    local DATASET="${MASK_DIR}/dataset.jsonl"
-    local NAME=$(basename "$MASK_DIR")
+train_dpo() {
+    local DATASET_PATH="$1"
+
+    if [[ -d "$DATASET_PATH" ]]; then
+        DATASET_PATH="${DATASET_PATH}/dataset.jsonl"
+    fi
+    if [[ ! -f "$DATASET_PATH" ]]; then
+        echo "Dataset file not found: $DATASET_PATH" >&2
+        exit 1
+    fi
+
+    local DATASET_DIR
+    DATASET_DIR=$(dirname "$DATASET_PATH")
+    local NAME
+    NAME=$(basename "$DATASET_DIR")
     local OUTPUT_DIR="/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_${NAME}"
     local LOG_FILE="${LOG_DIR}/${NAME}.log"
 
-    echo "Training with dataset: $DATASET"
+    echo "Training with dataset: $DATASET_PATH"
     echo "Output dir: $OUTPUT_DIR"
     echo "Log file: $LOG_FILE"
 
@@ -31,24 +41,20 @@ train_dpo() {
         EXTRA_ARGS+=("--reference_logprobs_cache_path=$REFERENCE_CACHE")
         echo "Using reference cache: $REFERENCE_CACHE"
     fi
-    if [[ -n "$CACHE_ONLY" ]]; then
-        EXTRA_ARGS+=("--cache_reference_logprobs_only")
-        echo "Cache-only mode: will exit after generating reference logprobs"
-    fi
 
     accelerate launch \
         --mixed_precision bf16 \
         --num_machines 1 \
-        --num_processes 8 \
+        --num_processes 1 \
         --use_deepspeed \
         --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
         open_instruct/dpo_tune_cache.py \
-        --mixer_list "${DATASET}" "1.0" \
+        --mixer_list "$DATASET_PATH" "1.0" \
         --output_dir="$OUTPUT_DIR" \
         --exp_name="dpo_filter_${NAME}" \
         --model_name_or_path="allenai/Olmo-3-7B-Instruct-SFT" \
         --tokenizer_name="allenai/Olmo-3-7B-Instruct-SFT" \
-        --max_seq_length=16384 \
+        --max_seq_length=8192 \
         --per_device_train_batch_size=1 \
         --gradient_accumulation_steps=16 \
         --learning_rate=1e-6 \
@@ -71,12 +77,6 @@ train_dpo() {
         2>&1 | tee "$LOG_FILE"
 }
 
-
-train_dpo "/workspace/olmo/dpo_filter_data/16K-baseline/dataset_autorated_filtered_1.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-train_dpo "/workspace/olmo/dpo_filter_data/16K-baseline/dataset_autorated_filtered_2.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-
-
-# # 16K filtered datasets
-# train_dpo "/workspace/olmo/dpo_filter_data/16K-feedback-20.0pct-flip/dataset.jsonl" "/workspace/olmo/dpo_filter_data/16K-baseline/4cbafd709b2165c4.pt"
-# # 33K filtered datasets
-# train_dpo "/workspace/olmo/dpo_filter_data/33K-feedback-10.0pct-flip/dataset.jsonl" "/workspace/olmo/dpo_filter_data/33K-baseline/08e80dd1a8213080.pt"
+for DATASET_PATH in "${DATASETS[@]}"; do
+    train_dpo "$DATASET_PATH"
+done
