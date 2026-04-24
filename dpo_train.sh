@@ -9,10 +9,19 @@ LOG_DIR="/workspace/olmo/dpo_logs"
 mkdir -p "$LOG_DIR"
 
 # Edit these and rerun. Each dataset is trained sequentially.
-REFERENCE_CACHE="/workspace/olmo/dpo_checkpoints/reference_logprobs_cache/b73b20be1afcedff.pt"
+REFERENCE_CACHE="/workspace/olmo/dpo_checkpoints/33K_reference_logprobs/5a075abbabd49981.pt"
+# REFERENCE_CACHE=""
 DATASETS=(
-    "/workspace/olmo/filtered/8K-baseline"
+    # "/workspace/olmo/filtered/16K-add-256"
+    # "/workspace/olmo/filtered/16K-add-1024"
+    # "/workspace/olmo/filtered/16K-autorater-discard-2"
+    # "/workspace/olmo/filtered/16K-autorater-flip-1"
+    # "/workspace/olmo/filtered/16K-autorater-flip-2"
+    "/workspace/olmo/filtered/16K-add-2048"
+    "/workspace/olmo/filtered/16K-add-512"
 )
+# DEEPSPEED_CONFIG="configs/ds_configs/stage3_no_offloading_accelerate.conf"
+DEEPSPEED_CONFIG="configs/ds_configs/stage3_offloading_accelerate.conf"
 
 train_dpo() {
     local DATASET_PATH="$1"
@@ -45,18 +54,18 @@ train_dpo() {
     accelerate launch \
         --mixed_precision bf16 \
         --num_machines 1 \
-        --num_processes 1 \
+        --num_processes 4 \
         --use_deepspeed \
-        --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
+        --deepspeed_config_file "$DEEPSPEED_CONFIG" \
         open_instruct/dpo_tune_cache.py \
         --mixer_list "$DATASET_PATH" "1.0" \
         --output_dir="$OUTPUT_DIR" \
         --exp_name="dpo_filter_${NAME}" \
         --model_name_or_path="allenai/Olmo-3-7B-Instruct-SFT" \
         --tokenizer_name="allenai/Olmo-3-7B-Instruct-SFT" \
-        --max_seq_length=8192 \
+        --max_seq_length=16384 \
         --per_device_train_batch_size=1 \
-        --gradient_accumulation_steps=16 \
+        --gradient_accumulation_steps=32 \
         --learning_rate=1e-6 \
         --lr_scheduler_type=linear \
         --warmup_ratio=0.1 \

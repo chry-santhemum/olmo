@@ -1,4 +1,4 @@
-import argparse
+# %%
 import asyncio
 import json
 import os
@@ -73,6 +73,10 @@ MAX_RETRIES = 5
 
 
 async def rate_dpo_pair(item: dict, client: Any, autorater_model: str, limiter: asyncio.Semaphore) -> int | None:
+    """
+    5 = rejected is more sycophantic than chosen
+    1 = chosen is more sycophantic than rejected
+    """
     processed = preprocess_dpo_pair(item)
     swapped = random.random() < 0.5
     if swapped:
@@ -196,9 +200,14 @@ def filter_autorater(
     target_dataset_size: int | None = None,
     random_seed: int = 42,
     extra_dataset_path: Path | None = None,
+    extra_dataset_size: int | None = None,
 ) -> Path:
+    """
+    direction: Select rows rated, inclusive
+    action: done on selected rows
+    """
     source_rows = load_jsonl(dataset_path)
-    extra_rows = load_extra_rows(extra_dataset_path)
+    extra_rows = load_extra_rows(extra_dataset_path, extra_dataset_size, random_seed)
 
     selected_indices = set()
     for i, row in enumerate(source_rows):
@@ -226,6 +235,7 @@ def filter_autorater(
             "action": action,
             "target_dataset_size": target_dataset_size,
             "extra_dataset_path": None if extra_dataset_path is None else str(extra_dataset_path),
+            "extra_dataset_size": extra_dataset_size,
         },
         "original_dataset_size": len(source_rows),
         "original_num_selected": len(selected_indices),
@@ -245,44 +255,27 @@ def filter_autorater(
     logger.info(f"Saved metadata to {metadata_path}")
     return output_path
 
-
-def main() -> None:
-    dotenv.load_dotenv(".env")
-
-    parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    rate_parser = subparsers.add_parser("rate")
-    rate_parser.add_argument("dataset_path", type=Path)
-    rate_parser.add_argument("output_path", type=Path)
-    rate_parser.add_argument("--autorater-model", default="openai/gpt-5-nano")
-    rate_parser.add_argument("--max-parallel-req", type=int, default=1024)
-
-    filter_parser = subparsers.add_parser("filter")
-    filter_parser.add_argument("dataset_path", type=Path)
-    filter_parser.add_argument("save_dir", type=Path)
-    filter_parser.add_argument("--threshold", type=int, required=True)
-    filter_parser.add_argument("--direction", choices=["above", "below"], default="above")
-    filter_parser.add_argument("--action", choices=["discard", "flip"], default="discard")
-    filter_parser.add_argument("--target-dataset-size", type=int)
-    filter_parser.add_argument("--random-seed", type=int, default=42)
-    filter_parser.add_argument("--extra-dataset-path", type=Path)
-
-    args = parser.parse_args()
-    if args.command == "rate":
-        rate_dataset(args.dataset_path, args.output_path, args.autorater_model, args.max_parallel_req)
-    else:
-        filter_autorater(
-            args.dataset_path,
-            args.save_dir,
-            threshold=args.threshold,
-            direction=args.direction,
-            action=args.action,
-            target_dataset_size=args.target_dataset_size,
-            random_seed=args.random_seed,
-            extra_dataset_path=args.extra_dataset_path,
-        )
-
-
+# %%
 if __name__ == "__main__":
-    main()
+    dotenv.load_dotenv(".env")
+    import nest_asyncio
+    nest_asyncio.apply()
+
+    rate_dataset(
+        dataset_path=Path("filtered/33K-baseline/dataset.jsonl"),
+        output_path=Path("filtered/33K-baseline/dataset_autorated.jsonl"),
+    )
+
+# %%
+    filter_autorater(
+        dataset_path=Path("filtered/33K-baseline/dataset_autorated.jsonl"),
+        save_dir=Path("filtered/0.25K-debug-autorater"),
+        threshold=1,
+        direction="below",
+        action="flip",
+        target_dataset_size=256,
+        extra_dataset_path=None,
+        extra_dataset_size=None,
+    )
+
+# %%

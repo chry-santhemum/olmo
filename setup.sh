@@ -2,6 +2,8 @@
 
 echo "Syncing uv environment..."
 uv venv /root/.venv-vllm
+source /root/.venv-vllm/bin/activate
+uv pip install vllm
 source /root/.venv/bin/activate
 cd /workspace/olmo
 uv sync --active

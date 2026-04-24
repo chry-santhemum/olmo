@@ -2,15 +2,24 @@
 import ast
 import asyncio
 import re
+from pathlib import Path
 
-from tqdm import tqdm
+from openai import AsyncOpenAI
+from tqdm.asyncio import tqdm_asyncio
 
-from prompts_false_beliefs import false_beliefs
+from client import load_config
+from filter_vector import save_jsonl
+from prompts_false_beliefs_100 import false_beliefs
 
 
 
 # %%
-n_prompts_per_belief = 5
+n_prompts_per_belief = 10
+n_responses_per_prompt = 10
+max_parallel_requests = 64
+max_retries = 5
+config = load_config()
+model = config["model"]
 
 GENERATE_PROMPT = """
 Yoy are a part of a research pipeline aimed at studying sycophancy in language models.
@@ -35,61 +44,6 @@ In your response, include a properly formatted python list of {n_prompts} string
 
 Make sure the prompts are diverse but stick to the requirements.
 """.strip()
-
-
-async def generate_belief_prompts_one(belief: str) -> list[str]:
-    from client import get_client
-
-    client = get_client(host="127.0.0.1", port=8020)
-    messages = [{"role": "user", "content": GENERATE_PROMPT.format(belief=belief, n_prompts=n_prompts_per_belief)}]
-
-    for attempt in range(5):
-        try:
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
-                model="allenai/Olmo-3-7B-Instruct-SFT",
-                messages=messages,
-                temperature=0.8,
-                max_tokens=1024,
-            )
-            prompts = parse_python_list(response.choices[0].message.content or "")
-            if len(prompts) != n_prompts_per_belief:
-                raise ValueError(f"Expected {n_prompts_per_belief} prompts, got {len(prompts)}")
-            return prompts
-        except Exception:
-            if attempt == 4:
-                raise
-            await asyncio.sleep(1)
-
-
-def generate_belief_prompts(beliefs: list[str]) -> list[dict]:
-    """
-    Returns a list of dictionaries:
-    {"prompt": prompt, "belief": belief}
-    """
-
-    async def main() -> list[dict]:
-        max_parallel_requests = 32
-        limiter = asyncio.Semaphore(max_parallel_requests)
-
-        async def generate_one(i: int, belief: str) -> tuple[int, list[str]]:
-            async with limiter:
-                return i, await generate_belief_prompts_one(belief)
-
-        tasks = [asyncio.create_task(generate_one(i, belief)) for i, belief in enumerate(beliefs)]
-        prompt_lists = [None] * len(beliefs)
-
-        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Generating prompts"):
-            i, prompts = await task
-            prompt_lists[i] = prompts
-
-        rows = []
-        for belief, prompts in zip(beliefs, prompt_lists):
-            for prompt in prompts:
-                rows.append({"prompt": prompt, "belief": belief})
-        return rows
-
-    return asyncio.run(main())
 
 
 def parse_python_list(text: str) -> list[str]:
@@ -171,86 +125,91 @@ Make sure the responses are diverse: they should correct the false belief in dif
 """
 
 
-# %%
-from client import get_client
+async def generate_list(client: AsyncOpenAI, prompt: str, expected_length: int) -> list[str]:
+    messages = [{"role": "user", "content": prompt}]
 
-prompts = generate_belief_prompts(false_beliefs)
-
-client = get_client(host="127.0.0.1", port=8020)
-model = "allenai/Olmo-3-7B-Instruct-SFT"
-n_responses_per_prompt = 5
-max_parallel_requests = 32
-
-
-async def generate_response_list(prompt: str, prompt_template: str) -> list[str]:
-    messages = [{"role": "user", "content": prompt_template.format(prompt=prompt, n_responses=n_responses_per_prompt)}]
-
-    for attempt in range(5):
+    for attempt in range(max_retries):
         try:
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
+            response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0.8,
                 max_tokens=1024,
             )
-            responses = parse_python_list(response.choices[0].message.content or "")
-            if len(responses) != n_responses_per_prompt:
-                raise ValueError(f"Expected {n_responses_per_prompt} responses, got {len(responses)}")
-            return responses
+            items = parse_python_list(response.choices[0].message.content or "")
+            if len(items) != expected_length:
+                raise ValueError(f"Expected {expected_length} items, got {len(items)}")
+            return items
         except Exception:
-            if attempt == 4:
+            if attempt == max_retries - 1:
                 raise
             await asyncio.sleep(1)
 
-
-async def generate_rows() -> list[dict]:
+# %%
+async def main() -> list[dict]:
     limiter = asyncio.Semaphore(max_parallel_requests)
 
-    async def generate_one(i: int, prompt_row: dict, key: str, prompt_template: str) -> tuple[int, str, list[str]]:
-        async with limiter:
-            responses = await generate_response_list(prompt_row["prompt"], prompt_template)
-        return i, key, responses
+    async with AsyncOpenAI(
+        base_url=f"http://{config['host']}:{config['port']}/v1",
+        api_key="dummy",
+    ) as client:
 
-    tasks = []
-    for i, prompt_row in enumerate(prompts):
-        tasks.append(asyncio.create_task(generate_one(i, prompt_row, "chosen", ANTI_SYCOPHANTIC_RESPONSE)))
-        tasks.append(asyncio.create_task(generate_one(i, prompt_row, "rejected", SYCOPHANTIC_RESPONSE)))
+        async def generate_prompts_for_belief(belief: str) -> list[str]:
+            async with limiter:
+                return await generate_list(
+                    client,
+                    GENERATE_PROMPT.format(belief=belief, n_prompts=n_prompts_per_belief),
+                    n_prompts_per_belief,
+                )
 
-    chosen_lists = [None] * len(prompts)
-    rejected_lists = [None] * len(prompts)
+        prompt_lists = await tqdm_asyncio.gather(
+            *(generate_prompts_for_belief(belief) for belief in false_beliefs),
+            desc="Generating prompts",
+            total=len(false_beliefs),
+        )
+        prompt_rows = [
+            {"prompt": prompt, "belief": belief}
+            for belief, prompts in zip(false_beliefs, prompt_lists)
+            for prompt in prompts
+        ]
 
-    for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Generating responses"):
-        i, key, responses = await task
-        if key == "chosen":
-            chosen_lists[i] = responses
-        else:
-            rejected_lists[i] = responses
+        async def generate_rows_for_prompt(prompt_row: dict) -> list[dict]:
+            async def generate_responses(prompt_template: str) -> list[str]:
+                async with limiter:
+                    return await generate_list(
+                        client,
+                        prompt_template.format(prompt=prompt_row["prompt"], n_responses=n_responses_per_prompt),
+                        n_responses_per_prompt,
+                    )
 
-    rows = []
-    for prompt_row, chosen_list, rejected_list in zip(prompts, chosen_lists, rejected_lists):
-        user_message = {"role": "user", "content": prompt_row["prompt"]}
-        for chosen, rejected in zip(chosen_list, rejected_list):
-            rows.append(
+            chosen_list, rejected_list = await asyncio.gather(
+                generate_responses(ANTI_SYCOPHANTIC_RESPONSE),
+                generate_responses(SYCOPHANTIC_RESPONSE),
+            )
+            user_message = {"role": "user", "content": prompt_row["prompt"]}
+            return [
                 {
                     "chosen": [user_message, {"role": "assistant", "content": chosen}],
                     "rejected": [user_message, {"role": "assistant", "content": rejected}],
                     "belief": prompt_row["belief"],
                 }
-            )
+                for chosen, rejected in zip(chosen_list, rejected_list)
+            ]
 
-    return rows
+        row_lists = await tqdm_asyncio.gather(
+            *(generate_rows_for_prompt(prompt_row) for prompt_row in prompt_rows),
+            desc="Generating responses",
+            total=len(prompt_rows),
+        )
 
-
-rows = asyncio.run(generate_rows())
-
+    return [row for row_list in row_lists for row in row_list]
 
 # %%
-from pathlib import Path
+import nest_asyncio
+nest_asyncio.apply()
+rows = asyncio.run(main())
 
-from filter_vector import save_jsonl
-
-save_dir = Path("filtered/synthetic/false_beliefs_100.jsonl")
+save_dir = Path("synthetic_pairs/false_beliefs_100_10K.jsonl")
 save_dir.parent.mkdir(parents=True, exist_ok=True)
 
 """
@@ -258,3 +217,5 @@ Each row:
 {"chosen": [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}], "rejected": [...], "belief": belief}
 """
 save_jsonl(save_dir, rows)
+
+# %%

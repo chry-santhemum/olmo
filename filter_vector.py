@@ -98,10 +98,38 @@ def resample_items(items, target_size: int | None, random_seed: int):
     return output
 
 
-def load_extra_rows(extra_dataset_path: Path | None) -> list[dict]:
+def sample_items(items, target_size: int | None, random_seed: int):
+    if target_size is None:
+        return list(items)
+    if target_size < 0:
+        raise ValueError(f"target_size must be non-negative, got {target_size}")
+    if target_size == 0:
+        return []
+    if len(items) == 0:
+        raise ValueError("Cannot sample an empty dataset to a positive target size")
+
+    rng = np.random.RandomState(random_seed)
+    output = []
+    remaining = target_size
+
+    while remaining > 0:
+        sampled = rng.permutation(len(items))[: min(remaining, len(items))]
+        output.extend(items[i] for i in sampled)
+        remaining -= len(sampled)
+
+    return output
+
+
+def load_extra_rows(
+    extra_dataset_path: Path | None,
+    extra_dataset_size: int | None = None,
+    random_seed: int = 42,
+) -> list[dict]:
     if extra_dataset_path is None:
         return []
     extra_rows = load_jsonl(extra_dataset_path)
+    extra_rows = sample_items(extra_rows, extra_dataset_size, random_seed)
+    extra_rows = [{"chosen": row["chosen"], "rejected": row["rejected"]} for row in extra_rows]
     normalized_rows = [normalize_training_row(row, i, force_new=True) for i, row in enumerate(extra_rows)]
     logger.info(f"Loaded {len(normalized_rows)} extra rows from {extra_dataset_path}")
     return normalized_rows
@@ -169,6 +197,7 @@ def filter_vector(
     print_num: int = 10,
     random_seed: int = 42,
     extra_dataset_path: Path | None = None,
+    extra_dataset_size: int | None = None,
 ) -> Path:
     manifest_path = cache_dir / "manifest.json"
     with open(manifest_path) as f:
@@ -179,7 +208,7 @@ def filter_vector(
         raise FileNotFoundError(f"Dataset path {dataset_path} does not exist")
 
     source_rows = load_jsonl(dataset_path)
-    extra_rows = load_extra_rows(extra_dataset_path)
+    extra_rows = load_extra_rows(extra_dataset_path, extra_dataset_size, random_seed)
 
     sims: list[float] = []
     logger.info(f"Computing {method} similarities...")
@@ -204,7 +233,6 @@ def filter_vector(
         raise ValueError(f"Similarity count {len(sims)} does not match dataset size {len(source_rows)}")
 
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_distribution_figure(np.array(sims), save_dir / "distr.png")
     save_percentile_examples(cache_dir, save_dir / "examples.json", manifest, sims, print_num)
 
     selected_indices: set[int] = set()
@@ -241,6 +269,7 @@ def filter_vector(
     base_examples = resample_items(base_examples, base_target_size, random_seed)
     base_rows = [row for row, _ in base_examples]
     base_sims = [sim for _, sim in base_examples]
+    save_distribution_figure(np.array(base_sims), save_dir / "distr.png")
     output_rows = finalize_training_rows(base_rows + extra_rows)
 
     mean_sim = float(np.mean(base_sims)) if base_sims else 0.0
@@ -255,6 +284,7 @@ def filter_vector(
             "layer": layer,
             "target_dataset_size": target_dataset_size,
             "extra_dataset_path": None if extra_dataset_path is None else str(extra_dataset_path),
+            "extra_dataset_size": extra_dataset_size,
         },
         "sum_similarity": sum_sim,
         "mean_similarity": mean_sim,
@@ -379,4 +409,3 @@ def get_persona_vectors(model: str, trait: str):
         save_dir=f"vectors/{model_slug}/",
         threshold=50,
     )
-

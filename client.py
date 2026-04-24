@@ -5,7 +5,7 @@ from pathlib import Path
 from openai import OpenAI
 
 
-def load_config(config_path: str = "vllm_configs/config_instr_sft.yaml") -> dict:
+def load_config(config_path: str = "vllm_configs/config_instr_sft.yml") -> dict:
     """Load configuration from YAML file."""
     config_file = Path(__file__).parent / config_path
     with open(config_file) as f:
