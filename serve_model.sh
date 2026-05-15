@@ -22,6 +22,8 @@ MODEL=$(grep '^model:' "$CONFIG_FILE" | awk '{print $2}')
 HOST=$(grep '^host:' "$CONFIG_FILE" | awk '{print $2}' | tr -d '"')
 PORT=$(grep '^port:' "$CONFIG_FILE" | awk '{print $2}')
 DTYPE=$(grep '^dtype:' "$CONFIG_FILE" | awk '{print $2}' | tr -d '"')
+MAX_MODEL_LEN=$(grep '^max-model-len:' "$CONFIG_FILE" | awk '{print $2}')
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16448}"
 
 # Allow command line overrides
 while [[ $# -gt 0 ]]; do
@@ -42,9 +44,13 @@ while [[ $# -gt 0 ]]; do
             DTYPE="$2"
             shift 2
             ;;
+        --max-model-len)
+            MAX_MODEL_LEN="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--config CONFIG_FILE] [--model MODEL] [--host HOST] [--port PORT] [--dtype DTYPE]"
+            echo "Usage: $0 [--config CONFIG_FILE] [--model MODEL] [--host HOST] [--port PORT] [--dtype DTYPE] [--max-model-len MAX_MODEL_LEN]"
             exit 1
             ;;
     esac
@@ -57,6 +63,7 @@ echo "Model: $MODEL"
 echo "Host: $HOST"
 echo "Port: $PORT"
 echo "Dtype: $DTYPE"
+echo "Max model len: $MAX_MODEL_LEN"
 echo "========================================"
 
 # Activate vLLM virtual environment and serve
@@ -65,4 +72,6 @@ source "$VLLM_VENV/bin/activate"
 vllm serve "$MODEL" \
     --host "$HOST" \
     --port "$PORT" \
-    --dtype "$DTYPE"
+    --dtype "$DTYPE" \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --gpu-memory-utilization 0.7

@@ -8,17 +8,27 @@ uv sync --active
 LOG_DIR="/workspace/olmo/dpo_logs"
 mkdir -p "$LOG_DIR"
 
-# Edit these and rerun. Each dataset is trained sequentially.
-REFERENCE_CACHE="/workspace/olmo/dpo_checkpoints/33K_reference_logprobs/5a075abbabd49981.pt"
+# Each dataset is trained sequentially, using all four GPUs for each run.
+NUM_GPUS=4
+REFERENCE_CACHE="/workspace/olmo/checkpoints/33K_reference_logprobs/5a075abbabd49981.pt"
 # REFERENCE_CACHE=""
 DATASETS=(
-    # "/workspace/olmo/filtered/16K-add-256"
-    # "/workspace/olmo/filtered/16K-add-1024"
-    # "/workspace/olmo/filtered/16K-autorater-discard-2"
-    # "/workspace/olmo/filtered/16K-autorater-flip-1"
-    # "/workspace/olmo/filtered/16K-autorater-flip-2"
-    "/workspace/olmo/filtered/16K-add-2048"
-    "/workspace/olmo/filtered/16K-add-512"
+    # "/workspace/olmo/filtered/16K-autorater-discard-2-seed-42"
+    # "/workspace/olmo/filtered/16K-autorater-discard-2-seed-43"
+    # "/workspace/olmo/filtered/16K-autorater-discard-2-seed-44"
+    # "/workspace/olmo/filtered/16K-persona-21pct-discard-seed-42"
+    # "/workspace/olmo/filtered/16K-persona-21pct-discard-seed-43"
+    # "/workspace/olmo/filtered/16K-persona-21pct-discard-seed-44"
+    # "/workspace/olmo/filtered/16K-autorater-flip-2-seed-42"
+    # "/workspace/olmo/filtered/16K-persona-21pct-flip-seed-42"
+    # "/workspace/olmo/filtered/16K-baseline-seed-42"
+    # "/workspace/olmo/filtered/16K-autorater-flip-2-seed-43"
+    # "/workspace/olmo/filtered/16K-persona-21pct-flip-seed-43"
+    "/workspace/olmo/filtered/16K-LLS-neg-discard-seed-42"
+    "/workspace/olmo/filtered/16K-LLS-neg-flip-seed-42"
+    "/workspace/olmo/filtered/16K-persona-pos-flip-seed-42"
+    "/workspace/olmo/filtered/16K-LLS-neg-discard-seed-43"
+    "/workspace/olmo/filtered/16K-LLS-neg-flip-seed-43"
 )
 # DEEPSPEED_CONFIG="configs/ds_configs/stage3_no_offloading_accelerate.conf"
 DEEPSPEED_CONFIG="configs/ds_configs/stage3_offloading_accelerate.conf"
@@ -38,7 +48,7 @@ train_dpo() {
     DATASET_DIR=$(dirname "$DATASET_PATH")
     local NAME
     NAME=$(basename "$DATASET_DIR")
-    local OUTPUT_DIR="/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_${NAME}"
+    local OUTPUT_DIR="/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_${NAME}"
     local LOG_FILE="${LOG_DIR}/${NAME}.log"
 
     echo "Training with dataset: $DATASET_PATH"
@@ -54,7 +64,7 @@ train_dpo() {
     accelerate launch \
         --mixed_precision bf16 \
         --num_machines 1 \
-        --num_processes 4 \
+        --num_processes "$NUM_GPUS" \
         --use_deepspeed \
         --deepspeed_config_file "$DEEPSPEED_CONFIG" \
         open_instruct/dpo_tune_cache.py \

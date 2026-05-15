@@ -234,6 +234,7 @@ def filter_autorater(
             "direction": direction,
             "action": action,
             "target_dataset_size": target_dataset_size,
+            "random_seed": random_seed,
             "extra_dataset_path": None if extra_dataset_path is None else str(extra_dataset_path),
             "extra_dataset_size": extra_dataset_size,
         },

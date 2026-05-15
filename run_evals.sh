@@ -6,19 +6,18 @@ source ~/.venv/bin/activate
 
 # Edit these and rerun.
 MODELS=(
-    "instr-sft"
+    # "instr-sft"
     # "instr-dpo"
-    "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-autorater-flip-2"
-    "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-autorater-discard-2"
-    "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-feedback-20.0pct-flip"
-    "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-feedback-20.0pct-prune"
-    # "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-baseline"
-    # "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-add-256"
-    # "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-add-1024"
-    # "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-add-2048"
-    # "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-all-flip"
-    # "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-autorater-flip-1"
-    # "/workspace/olmo/dpo_checkpoints/olmo3_7b_instruct_dpo_16K-feedback-5.0pct-flip"
+    # "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-LLS-neg-discard-seed-42"
+    # "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-LLS-neg-flip-seed-42"
+    # "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-feedback-v2-21pct-flip-seed-42"
+    # "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-feedback-v2-pos-flip-seed-42"
+    # "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-persona-pos-flip-seed-42"
+    "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-LLS-neg-discard-seed-43"
+    "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-LLS-neg-flip-seed-43"
+    "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-feedback-v2-21pct-flip-seed-43"
+    "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-feedback-v2-pos-flip-seed-43"
+    "/workspace/olmo/checkpoints/olmo3_7b_instruct_dpo_16K-persona-pos-flip-seed-43"
 )
 
 TASK="feedback_v2"

@@ -1,0 +1,75 @@
+{
+  "score_signs": "aligned",
+  "score_sign_note": "Aligned with autorater=6-raw_score and lls=-raw_score.",
+  "methods": [
+    "persona_vector",
+    "feedback_vector",
+    "autorater",
+    "lls"
+  ],
+  "config": {
+    "cache_dir": "cached_repr_33K_SFT/Olmo-3-7B-Instruct-SFT-L23",
+    "autorater_path": "filtered/33K-baseline/dataset_autorated.jsonl",
+    "lls_path": "cached_repr_33K_SFT/LLS/full/scores.jsonl",
+    "persona_vector_path": "vectors/Olmo-3-7B-Instruct-SFT/sycophantic_response_avg_diff.pt",
+    "feedback_vector_path": "vectors/feedback_v2_contrast_20260504_051537/contrast_L23.pt",
+    "layer": 23,
+    "limit": null
+  },
+  "correlations": [
+    {
+      "method_a": "persona_vector",
+      "method_b": "feedback_vector",
+      "n": 32768,
+      "spearman": -0.32744960690350694,
+      "spearman_p": 0.0,
+      "kendall_tau": -0.22218810819589097,
+      "kendall_p": 0.0
+    },
+    {
+      "method_a": "persona_vector",
+      "method_b": "autorater",
+      "n": 32766,
+      "spearman": 0.19742718998058223,
+      "spearman_p": 3.0878034931138552e-285,
+      "kendall_tau": 0.15671233890354677,
+      "kendall_p": 2.2528502023324506e-287
+    },
+    {
+      "method_a": "persona_vector",
+      "method_b": "lls",
+      "n": 32767,
+      "spearman": 0.09091961751211451,
+      "spearman_p": 4.223775812480561e-61,
+      "kendall_tau": 0.05891267024508035,
+      "kendall_p": 1.376173468921499e-57
+    },
+    {
+      "method_a": "feedback_vector",
+      "method_b": "autorater",
+      "n": 32766,
+      "spearman": 0.02994275260884093,
+      "spearman_p": 5.924653149512347e-08,
+      "kendall_tau": 0.02350807878027625,
+      "kendall_p": 5.4981611405124166e-08
+    },
+    {
+      "method_a": "feedback_vector",
+      "method_b": "lls",
+      "n": 32767,
+      "spearman": -0.013972671118490789,
+      "spearman_p": 0.011428637479610034,
+      "kendall_tau": -0.009066663725408368,
+      "kendall_p": 0.013828416795878925
+    },
+    {
+      "method_a": "autorater",
+      "method_b": "lls",
+      "n": 32765,
+      "spearman": 0.027579771467329994,
+      "spearman_p": 5.944775615052848e-07,
+      "kendall_tau": 0.02145452120550437,
+      "kendall_p": 7.063755288747372e-07
+    }
+  ]
+}

@@ -1,7 +1,6 @@
-"""Plot feedback_v2 eval metrics against the fraction of datapoints touched."""
+"""Analyze seed-averaged DPO ablations with paired bootstrap CIs."""
 
 import json
-import math
 import re
 import zipfile
 from collections import defaultdict
@@ -14,251 +13,78 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.lines import Line2D
 
 
-CHECKPOINT_PREFIX = "olmo3_7b_instruct_dpo_"
 TASK_NAME = "feedback_v2"
-ADD_TOTAL_ENTRIES = 16384
-DEFAULT_BOOTSTRAP_SAMPLES = 2000
-DEFAULT_CONFIDENCE_LEVEL = 0.95
-DEFAULT_BOOTSTRAP_SEED = 0
-FRACTION_SCALE_EXPONENT = math.log10(2.0)
-X_AXIS_PADDING = 0.03
-COMMON_X_TICKS = [0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
-SERIES_ORDER = ["add", "discard", "flip", "baseline", "SFT", "DPO"]
-
-# Edit these before running the file.
-RESULTS_DIRS: list[Path] = [
-    # Path("sycophancy_eval/results/20260410_160149"),
-    # Path("sycophancy_eval/results/20260410_162751"),
-    # Path("sycophancy_eval/results/20260410_162819"),
-    # Path("sycophancy_eval/results/20260410_170220"),
-    Path("sycophancy_eval/results/20260421_143756")
+SFT_MODEL_DIR = Path("sycophancy_eval/results/20260424_033530/olmo-3-7b-instruct-sft")
+FILTERED_RESULTS_DIRS = [
+    Path("sycophancy_eval/results/20260424_042228"),
+    Path("sycophancy_eval/results/20260426_161537"),
+    Path("sycophancy_eval/results/20260427_042812"),
+    Path("sycophancy_eval/results/20260427_133148"),
+    Path("sycophancy_eval/results/20260427_141257"),
+    Path("sycophancy_eval/results/20260427_152858"),
+    Path("sycophancy_eval/results/20260504_155155"),
+    Path("sycophancy_eval/results/20260504_165201"),
 ]
-REFERENCE_MODEL_NAME = "olmo3_7b_instruct_dpo_16K-feedback-20.0pct-flip"
-FILTERED_DIR = Path("filtered")
-OUTPUT_PATH = Path("dpo_sweep_analysis/new_1.png")
-CONFIDENCE_LEVEL = DEFAULT_CONFIDENCE_LEVEL
-BOOTSTRAP_SAMPLES = DEFAULT_BOOTSTRAP_SAMPLES
-BOOTSTRAP_SEED = DEFAULT_BOOTSTRAP_SEED
+OUTPUT_PATH = Path("dpo_sweep_analysis/dpo_ablation_bootstrap.png")
 
-ADD_NAME_PATTERN = re.compile(r"(?:^|-)add-(\d+)(?:$|-)")
-PCT_ACTION_PATTERN = re.compile(r"-(\d+(?:\.\d+)?)pct-(flip|prune|discard)(?:$|-)")
+BOOTSTRAP_SAMPLES = 2000
+CONFIDENCE_LEVEL = 0.95
+BOOTSTRAP_SEED = 0
 
-SERIES_COLORS = {
-    "add": "#1f77b4",
-    "discard": "#d62728",
-    "flip": "#2ca02c",
-    "baseline": "#444444",
-    "SFT": "#111111",
-    "DPO": "#9467bd",
+CHECKPOINT_PREFIX = "olmo3_7b_instruct_dpo_16K-"
+SEED_SUFFIX_PATTERN = re.compile(r"-seed-\d+$")
+BIAS_TYPES = ["positive", "negative"]
+BIAS_DISPLAY_NAMES = {
+    "positive": "positive bias",
+    "negative": "negative bias",
 }
-
-MARKER_BY_APPROACH = {
-    "vector": "o",
-    "autorater": "s",
-}
-
-METRIC_NAME_BY_BIAS = {
-    "positive": "feedback_v2/positive_likert_score",
-    "negative": "feedback_v2/negative_likert_score",
-}
+BAR_WIDTH = 0.42
+BAR_SPACING = 0.65
+DOT_JITTER_WIDTH = 0.10
+X_TICK_ROTATION = 55
 
 SampleKey = tuple[str, str]
 
 
 @dataclass(frozen=True)
-class SweepInfo:
-    dataset_name: str | None
-    operation: str
-    touched_fraction: float
-    series_label: str
-    source: str
-    metadata_path: str | None
+class EvalRun:
+    model_name: str
+    protocol_name: str
+    eval_path: Path
+    samples: dict[SampleKey, float]
 
 
 @dataclass(frozen=True)
 class MetricStats:
-    values: list[float]
     mean: float
-    ci_low: float | None
-    ci_high: float | None
+    ci_low: float
+    ci_high: float
 
 
-def dataset_name_for_model(model_name: str) -> str | None:
-    if model_name.startswith(CHECKPOINT_PREFIX):
-        return model_name.removeprefix(CHECKPOINT_PREFIX)
-    return None
+def newest_eval_path(model_dir: Path) -> Path:
+    eval_paths = list(model_dir.glob(f"{TASK_NAME}/*.eval"))
+    if not eval_paths:
+        raise FileNotFoundError(f"No {TASK_NAME} eval files found under {model_dir}")
+    return max(eval_paths, key=lambda path: path.stat().st_mtime)
 
 
-def sweep_info_from_metadata(dataset_name: str, metadata: dict, metadata_path: Path) -> SweepInfo:
-    """Read the sweep type and touched fraction from filtered dataset metadata."""
-    filter_config = metadata.get("filter_config", {})
-    extra_dataset_size = filter_config.get("extra_dataset_size")
-    if extra_dataset_size:
-        return SweepInfo(
-            dataset_name=dataset_name,
-            operation="add",
-            touched_fraction=float(extra_dataset_size) / ADD_TOTAL_ENTRIES,
-            series_label="add",
-            source="filtered metadata",
-            metadata_path=str(metadata_path),
-        )
-
-    action = filter_config.get("action")
-    if action in {"flip", "discard"}:
-        original_num_selected = metadata.get("original_num_selected")
-        original_dataset_size = metadata.get("original_dataset_size")
-        if original_num_selected is None or original_dataset_size in {None, 0}:
-            raise ValueError(
-                f"Missing original_num_selected/original_dataset_size in {metadata_path}"
-            )
-        return SweepInfo(
-            dataset_name=dataset_name,
-            operation=action,
-            touched_fraction=float(original_num_selected) / float(original_dataset_size),
-            series_label=action,
-            source="filtered metadata",
-            metadata_path=str(metadata_path),
-        )
-
-    if "baseline" in dataset_name:
-        return SweepInfo(
-            dataset_name=dataset_name,
-            operation="baseline",
-            touched_fraction=0.0,
-            series_label="baseline",
-            source="dataset name",
-            metadata_path=str(metadata_path),
-        )
-
-    raise ValueError(f"Could not determine sweep operation from {metadata_path}")
-
-
-def infer_sweep_info_from_name(model_name: str) -> SweepInfo | None:
-    """Infer sweep metadata from a checkpoint name when filtered metadata is absent."""
-    dataset_name = dataset_name_for_model(model_name)
-    if dataset_name and "baseline" in dataset_name:
-        return SweepInfo(
-            dataset_name=dataset_name,
-            operation="baseline",
-            touched_fraction=0.0,
-            series_label="baseline",
-            source="checkpoint name",
-            metadata_path=None,
-        )
-
-    add_match = ADD_NAME_PATTERN.search(model_name)
-    if add_match:
-        added_entries = int(add_match.group(1))
-        return SweepInfo(
-            dataset_name=dataset_name,
-            operation="add",
-            touched_fraction=added_entries / ADD_TOTAL_ENTRIES,
-            series_label="add",
-            source="checkpoint name",
-            metadata_path=None,
-        )
-
-    pct_match = PCT_ACTION_PATTERN.search(model_name)
-    if pct_match:
-        fraction = float(pct_match.group(1)) / 100.0
-        raw_operation = pct_match.group(2)
-        operation = "discard" if raw_operation in {"prune", "discard"} else raw_operation
-        return SweepInfo(
-            dataset_name=dataset_name,
-            operation=operation,
-            touched_fraction=fraction,
-            series_label=operation,
-            source="checkpoint name",
-            metadata_path=None,
-        )
-
-    if dataset_name == "16K-all-flip":
-        return SweepInfo(
-            dataset_name=dataset_name,
-            operation="flip",
-            touched_fraction=1.0,
-            series_label="flip",
-            source="checkpoint name",
-            metadata_path=None,
-        )
-
-    if model_name == "olmo-3-7b-instruct-sft":
-        return SweepInfo(
-            dataset_name=None,
-            operation="reference",
-            touched_fraction=0.0,
-            series_label="SFT",
-            source="model name",
-            metadata_path=None,
-        )
-
+def protocol_name_for_model(model_name: str) -> str:
     if model_name == "olmo-3-7b-instruct-dpo":
-        return SweepInfo(
-            dataset_name=None,
-            operation="reference",
-            touched_fraction=0.0,
-            series_label="DPO",
-            source="model name",
-            metadata_path=None,
-        )
-
-    return None
+        return "full-dpo"
+    if model_name.startswith(CHECKPOINT_PREFIX):
+        model_name = model_name.removeprefix(CHECKPOINT_PREFIX)
+    return SEED_SUFFIX_PATTERN.sub("", model_name)
 
 
-def resolve_sweep_info(model_name: str, filtered_dir: Path) -> SweepInfo:
-    """Resolve sweep metadata, preferring filtered metadata over name parsing."""
-    dataset_name = dataset_name_for_model(model_name)
-    if dataset_name is not None:
-        metadata_path = filtered_dir / dataset_name / "metadata.json"
-        if metadata_path.exists():
-            with open(metadata_path, encoding="utf-8") as f:
-                metadata = json.load(f)
-            return sweep_info_from_metadata(dataset_name, metadata, metadata_path)
+def extract_sycophancy_samples(eval_path: Path) -> dict[SampleKey, float]:
+    """Return per-sample scores where larger values mean more sycophancy.
 
-    inferred = infer_sweep_info_from_name(model_name)
-    if inferred is not None:
-        return inferred
-
-    raise ValueError(
-        "Could not resolve touch fraction. Expected filtered metadata or a checkpoint name "
-        f"that encodes it: {model_name}"
-    )
-
-
-def find_feedback_v2_eval_paths(results_dirs: list[Path]) -> tuple[dict[str, list[Path]], list[str]]:
-    """Collect feedback_v2 eval archives for each model under the given results trees."""
-    eval_paths_by_model: dict[str, list[Path]] = defaultdict(list)
-    warnings = []
-
-    for results_dir in results_dirs:
-        if not results_dir.exists():
-            raise FileNotFoundError(f"Results directory does not exist: {results_dir}")
-
-        for eval_path in results_dir.rglob(f"{TASK_NAME}/*.eval"):
-            model_name = eval_path.parent.parent.name
-            eval_paths_by_model[model_name].append(eval_path.resolve())
-
-    for model_name, eval_paths in eval_paths_by_model.items():
-        if len(eval_paths) > 1:
-            warnings.append(
-                f"{model_name}: found {len(eval_paths)} {TASK_NAME} evals, using the newest one"
-            )
-
-    return eval_paths_by_model, warnings
-
-
-def newest_path(paths: list[Path]) -> Path:
-    return max(paths, key=lambda path: path.stat().st_mtime)
-
-
-def extract_feedback_v2_metric_samples(eval_path: Path) -> dict[str, dict[SampleKey, float]]:
-    """Extract per-sample feedback_v2 likert scores keyed by `(bias_type, content_text)`."""
-    metric_samples = {
-        metric_name: {} for metric_name in METRIC_NAME_BY_BIAS.values()
-    }
+    The raw feedback_v2 score is positive for positive user bias and negative for
+    negative user bias, so negative-bias samples are sign-flipped before analysis.
+    """
+    samples: dict[SampleKey, float] = {}
 
     with zipfile.ZipFile(eval_path) as eval_zip:
         for member_name in eval_zip.namelist():
@@ -269,418 +95,273 @@ def extract_feedback_v2_metric_samples(eval_path: Path) -> dict[str, dict[Sample
             sample_metadata = sample.get("metadata")
             scorer = sample.get("scores", {}).get("graded_comparison_scorer")
             if not isinstance(sample_metadata, dict) or not isinstance(scorer, dict):
-                continue
+                raise ValueError(f"Malformed scored sample {member_name} in {eval_path}")
 
             judge_metadata = scorer.get("metadata")
             if not isinstance(judge_metadata, dict):
-                continue
+                raise ValueError(f"Missing judge metadata for {member_name} in {eval_path}")
 
             bias_type = judge_metadata.get("bias_type")
-            metric_name = METRIC_NAME_BY_BIAS.get(bias_type)
             content_text = sample_metadata.get("content_text")
             sycophancy_score = judge_metadata.get("sycophancy_score")
-            if metric_name is None or not isinstance(content_text, str):
-                continue
+            if bias_type not in {"positive", "negative"} or not isinstance(content_text, str):
+                raise ValueError(f"Missing feedback_v2 sample metadata in {member_name}")
             if not isinstance(sycophancy_score, Real):
-                continue
+                raise ValueError(f"Missing sycophancy score in {member_name}")
 
             key = (bias_type, content_text)
-            if key in metric_samples[metric_name]:
+            if key in samples:
                 raise ValueError(f"Duplicate sample key {key!r} in {eval_path}")
-            metric_samples[metric_name][key] = float(sycophancy_score)
 
-    return {metric_name: samples for metric_name, samples in metric_samples.items() if samples}
+            score = float(sycophancy_score)
+            samples[key] = score if bias_type == "positive" else -score
+
+    if not samples:
+        raise ValueError(f"No scored feedback_v2 samples found in {eval_path}")
+    return samples
 
 
-def paired_bootstrap_mean_ci(
-    reference_samples: dict[SampleKey, float],
-    model_samples: dict[SampleKey, float],
-    confidence_level: float,
-    bootstrap_samples: int,
-    seed: int,
-) -> MetricStats:
-    """Estimate a paired bootstrap CI for `model - reference` on shared eval samples."""
-    shared_keys = sorted(reference_samples.keys() & model_samples.keys())
-    if not shared_keys:
-        raise ValueError("No overlapping samples found for paired bootstrap")
-
-    diffs = np.asarray(
-        [model_samples[key] - reference_samples[key] for key in shared_keys],
-        dtype=float,
+def load_eval_run(model_dir: Path) -> EvalRun:
+    eval_path = newest_eval_path(model_dir)
+    model_name = model_dir.name
+    return EvalRun(
+        model_name=model_name,
+        protocol_name=protocol_name_for_model(model_name),
+        eval_path=eval_path,
+        samples=extract_sycophancy_samples(eval_path),
     )
-    mean = float(np.mean(diffs))
-    values = diffs.tolist()
-    if len(diffs) <= 1:
-        return MetricStats(values=values, mean=mean, ci_low=None, ci_high=None)
-    if np.allclose(diffs, diffs[0]):
-        return MetricStats(values=values, mean=mean, ci_low=mean, ci_high=mean)
 
-    rng = np.random.default_rng(seed)
+
+def load_protocol_runs() -> dict[str, list[EvalRun]]:
+    model_dirs = []
+    for results_dir in FILTERED_RESULTS_DIRS:
+        if not results_dir.exists():
+            raise FileNotFoundError(f"Results directory does not exist: {results_dir}")
+        model_dirs.extend(
+            sorted(
+                path
+                for path in results_dir.iterdir()
+                if path.is_dir() and (path / TASK_NAME).is_dir()
+            )
+        )
+
+    runs_by_protocol: dict[str, list[EvalRun]] = defaultdict(list)
+    for model_dir in model_dirs:
+        run = load_eval_run(model_dir)
+        runs_by_protocol[run.protocol_name].append(run)
+
+    return dict(
+        sorted(runs_by_protocol.items(), key=lambda item: protocol_sort_key(item[0]))
+    )
+
+
+def protocol_sort_key(protocol_name: str) -> tuple[int, str]:
+    return (0, protocol_name) if protocol_name == "full-dpo" else (1, protocol_name)
+
+
+def protocol_score_matrix(runs: list[EvalRun], sample_keys: list[SampleKey]) -> np.ndarray:
+    """Return one row per model seed, aligned to the SFT sample order."""
+    expected_keys = set(sample_keys)
+    run_scores = []
+    for run in runs:
+        run_keys = set(run.samples)
+        if not expected_keys <= run_keys:
+            missing = len(expected_keys - run_keys)
+            raise ValueError(
+                f"{run.model_name} does not match the SFT eval samples: "
+                f"{missing} missing"
+            )
+        run_scores.append([run.samples[key] for key in sample_keys])
+    return np.asarray(run_scores, dtype=float)
+
+
+def bootstrap_mean_ci(values: np.ndarray) -> MetricStats:
+    mean = float(values.mean())
+    if len(values) <= 1 or np.allclose(values, values[0]):
+        return MetricStats(mean=mean, ci_low=mean, ci_high=mean)
+
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
     resample_indices = rng.integers(
         0,
-        len(diffs),
-        size=(bootstrap_samples, len(diffs)),
+        len(values),
+        size=(BOOTSTRAP_SAMPLES, len(values)),
         endpoint=False,
     )
-    bootstrap_means = diffs[resample_indices].mean(axis=1)
-    alpha = (1.0 - confidence_level) / 2.0
-    ci_low = float(np.quantile(bootstrap_means, alpha))
-    ci_high = float(np.quantile(bootstrap_means, 1.0 - alpha))
-    return MetricStats(values=values, mean=mean, ci_low=ci_low, ci_high=ci_high)
+    bootstrap_means = values[resample_indices].mean(axis=1)
+    alpha = (1.0 - CONFIDENCE_LEVEL) / 2.0
+    return MetricStats(
+        mean=mean,
+        ci_low=float(np.quantile(bootstrap_means, alpha)),
+        ci_high=float(np.quantile(bootstrap_means, 1.0 - alpha)),
+    )
 
 
-def load_models(
-    eval_paths_by_model: dict[str, list[Path]],
-    filtered_dir: Path,
-) -> list[dict]:
-    """Load per-sample metric values for each discovered model."""
-    models = []
-
-    for model_name in sorted(eval_paths_by_model):
-        eval_path = newest_path(eval_paths_by_model[model_name])
-        sweep_info = resolve_sweep_info(model_name, filtered_dir)
-        metric_samples = extract_feedback_v2_metric_samples(eval_path)
-
-        if not metric_samples:
-            raise ValueError(f"No {TASK_NAME} sample metrics found in {eval_path}")
-
-        models.append(
-            {
-                "model_name": model_name,
-                "dataset_name": sweep_info.dataset_name,
-                "approach": approach_for_sweep_info(sweep_info),
-                "operation": sweep_info.operation,
-                "touched_fraction": sweep_info.touched_fraction,
-                "series_label": sweep_info.series_label,
-                "source": sweep_info.source,
-                "metadata_path": sweep_info.metadata_path,
-                "eval_path": eval_path,
-                "metric_samples": metric_samples,
-            }
-        )
-
-    return models
-
-
-def reference_model(models: list[dict], reference_model_name: str) -> dict:
-    """Return the model whose evals should be used as the paired reference."""
-    matching_models = [model for model in models if model["model_name"] == reference_model_name]
-    if len(matching_models) != 1:
-        raise ValueError(
-            f"Expected exactly one reference model named {reference_model_name!r}, "
-            f"found {len(matching_models)}"
-        )
-    return matching_models[0]
-
-
-def reference_display_name(model: dict) -> str:
-    """Return a short label for the chosen reference model."""
-    if model["series_label"] in {"SFT", "DPO"}:
-        return model["series_label"]
-    return model["model_name"]
-
-
-def add_reference_offsets(
-    models: list[dict],
-    reference_model_name: str,
-    confidence_level: float,
-    bootstrap_samples: int,
-    bootstrap_seed: int,
+def plot_results(
+    protocol_names: list[str],
+    delta_stats: dict[str, dict[str, MetricStats]],
+    run_delta_means: dict[str, dict[str, list[float]]],
+    output_path: Path,
 ) -> None:
-    """Populate each model's metrics with paired `model - reference` offsets."""
-    reference_run = reference_model(models, reference_model_name)
-    reference_metric_samples = reference_run["metric_samples"]
+    x_positions = np.arange(len(protocol_names)) * BAR_SPACING
+    color_cycle = ["#4c78a8", "#f58518", "#54a24b", "#e45756", "#72b7b2", "#b279a2"]
+    colors = [color_cycle[index % len(color_cycle)] for index in range(len(protocol_names))]
 
-    for model in models:
-        metrics = {}
-        for metric_name in sorted(reference_metric_samples):
-            if metric_name not in model["metric_samples"]:
-                raise ValueError(f"{model['model_name']} is missing metric {metric_name}")
-            if model["model_name"] == reference_model_name:
-                sample_count = len(reference_metric_samples[metric_name])
-                metrics[metric_name] = MetricStats(
-                    values=[0.0] * sample_count,
-                    mean=0.0,
-                    ci_low=0.0,
-                    ci_high=0.0,
-                )
-                continue
-
-            metrics[metric_name] = paired_bootstrap_mean_ci(
-                reference_samples=reference_metric_samples[metric_name],
-                model_samples=model["metric_samples"][metric_name],
-                confidence_level=confidence_level,
-                bootstrap_samples=bootstrap_samples,
-                seed=bootstrap_seed,
-            )
-        model["metrics"] = metrics
-
-
-def metric_names(models: list[dict]) -> list[str]:
-    all_metric_names = set()
-    for model in models:
-        all_metric_names.update(model["metrics"])
-    return sorted(all_metric_names)
-
-
-def fraction_plot_position(fraction: float) -> float:
-    if fraction <= 0:
-        return 0.0
-    return float(fraction ** FRACTION_SCALE_EXPONENT)
-
-
-def format_fraction(value: float) -> str:
-    if value == 0:
-        return "0"
-    return f"{value:.2g}"
-
-
-def humanize(text: str) -> str:
-    return text.replace("_", " ")
-
-
-def series_sort_key(series_label: str) -> tuple[int, str]:
-    if series_label in SERIES_ORDER:
-        return SERIES_ORDER.index(series_label), series_label
-    return len(SERIES_ORDER), series_label
-
-
-def approach_for_sweep_info(sweep_info: SweepInfo) -> str:
-    if sweep_info.series_label in {"SFT", "DPO"}:
-        return "reference"
-    if sweep_info.dataset_name and "autorater" in sweep_info.dataset_name:
-        return "autorater"
-    return "vector"
-
-
-def jittered_x_positions(points: list[dict]) -> list[float]:
-    """Spread points slightly when several runs share the same touched fraction."""
-    positions = [fraction_plot_position(model["touched_fraction"]) for model in points]
-    index_groups: dict[float, list[int]] = defaultdict(list)
-    for index, model in enumerate(points):
-        index_groups[model["touched_fraction"]].append(index)
-
-    jitter_step = 0.012
-    for indices in index_groups.values():
-        if len(indices) <= 1:
-            continue
-        base_position = positions[indices[0]]
-        if base_position <= 0.0:
-            offsets = np.linspace(0.0, jitter_step * (len(indices) - 1), len(indices))
-        elif base_position >= 1.0:
-            offsets = np.linspace(-jitter_step * (len(indices) - 1), 0.0, len(indices))
-        else:
-            offsets = np.linspace(
-                -jitter_step * (len(indices) - 1) / 2.0,
-                jitter_step * (len(indices) - 1) / 2.0,
-                len(indices),
-            )
-        for index, offset in zip(indices, offsets):
-            positions[index] = min(1.0, max(0.0, positions[index] + float(offset)))
-
-    return positions
-
-
-def legend_handles(models: list[dict], reference_model_name: str) -> list[Line2D]:
-    """Build legend entries for the plotted series, approaches, and reference line."""
-    reference_run = reference_model(models, reference_model_name)
-    non_reference_models = [
-        model for model in models if model["model_name"] != reference_model_name
-    ]
-    handles = []
-
-    present_series_labels = sorted(
-        {model["series_label"] for model in non_reference_models},
-        key=series_sort_key,
+    fig, axes = plt.subplots(
+        len(BIAS_TYPES),
+        1,
+        figsize=(max(9, 0.85 * len(protocol_names)), 7.5),
+        squeeze=False,
     )
-    for series_label in present_series_labels:
-        handles.append(
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color=SERIES_COLORS.get(series_label, "#444444"),
-                linestyle="",
-                label=series_label,
-            )
+
+    for ax, bias_type in zip(axes[:, 0], BIAS_TYPES):
+        stats_by_protocol = delta_stats[bias_type]
+        means = [stats_by_protocol[name].mean for name in protocol_names]
+        yerr = np.asarray(
+            [
+                [
+                    stats_by_protocol[name].mean - stats_by_protocol[name].ci_low
+                    for name in protocol_names
+                ],
+                [
+                    stats_by_protocol[name].ci_high - stats_by_protocol[name].mean
+                    for name in protocol_names
+                ],
+            ]
+        )
+        ax.bar(x_positions, means, width=BAR_WIDTH, color=colors, alpha=0.75)
+        ax.errorbar(
+            x_positions,
+            means,
+            yerr=yerr,
+            fmt="none",
+            ecolor="#333333",
+            elinewidth=1.2,
+            capsize=4,
+            zorder=3,
         )
 
-    for approach in ["vector", "autorater"]:
-        if any(model["approach"] == approach for model in non_reference_models):
-            handles.append(
-                Line2D(
-                    [0],
-                    [0],
-                    marker=MARKER_BY_APPROACH[approach],
-                    color="#444444",
-                    linestyle="",
-                    label=approach,
-                )
+        for x_position, protocol_name, color in zip(x_positions, protocol_names, colors):
+            run_means = run_delta_means[bias_type][protocol_name]
+            offsets = (
+                np.linspace(-DOT_JITTER_WIDTH, DOT_JITTER_WIDTH, len(run_means))
+                if len(run_means) > 1
+                else [0.0]
             )
-
-    handles.append(
-        Line2D(
-            [0],
-            [0],
-            color=SERIES_COLORS.get(reference_run["series_label"], "#444444"),
-            linestyle=":",
-            label=f"reference ({reference_display_name(reference_run)})",
-        )
-    )
-    return handles
-
-
-def plot_metrics(models: list[dict], output_path: Path, reference_model_name: str) -> None:
-    """Save one figure with one subplot per metric."""
-    names = metric_names(models)
-    if not names:
-        raise ValueError("No metrics found to plot")
-
-    reference_run = reference_model(models, reference_model_name)
-    reference_name = reference_display_name(reference_run)
-    fig, axes = plt.subplots(1, len(names), figsize=(7 * len(names), 5), squeeze=False)
-    axes = list(axes[0])
-
-    for ax, metric_name in zip(axes, names):
-        points = [model for model in models if metric_name in model["metrics"]]
-        sweep_models = [
-            model for model in points if model["model_name"] != reference_model_name
-        ]
-        sweep_models.sort(
-            key=lambda model: (
-                model["touched_fraction"],
-                series_sort_key(model["series_label"]),
-                model["model_name"],
-            )
-        )
-
-        metric = reference_run["metrics"][metric_name]
-        if metric.ci_low is not None and metric.ci_high is not None:
-            ax.axhspan(
-                metric.ci_low,
-                metric.ci_high,
-                color=SERIES_COLORS.get(reference_run["series_label"], "#444444"),
-                alpha=0.12,
-                zorder=1,
-            )
-        ax.axhline(
-            metric.mean,
-            color=SERIES_COLORS.get(reference_run["series_label"], "#444444"),
-            linestyle=":",
-            linewidth=1.5,
-            zorder=1,
-        )
-
-        x_positions = jittered_x_positions(sweep_models)
-        for model, x_position in zip(sweep_models, x_positions):
-            metric = model["metrics"][metric_name]
-            yerr = None
-            if metric.ci_low is not None and metric.ci_high is not None:
-                yerr = np.array([[metric.mean - metric.ci_low], [metric.ci_high - metric.mean]])
-
-            series_label = model["series_label"]
-            color = SERIES_COLORS.get(series_label, "#444444")
-            marker = MARKER_BY_APPROACH.get(model["approach"], "o")
-            ax.errorbar(
-                [x_position],
-                [metric.mean],
-                yerr=yerr,
-                fmt=marker,
-                markersize=7,
-                capsize=4,
-                linewidth=1.2,
+            ax.scatter(
+                x_position + offsets,
+                run_means,
                 color=color,
-                ecolor=color,
-                zorder=2,
+                edgecolor="#222222",
+                linewidth=0.8,
+                s=42,
+                zorder=4,
             )
 
-        ax.set_xticks([fraction_plot_position(value) for value in COMMON_X_TICKS])
-        ax.set_xticklabels([format_fraction(value) for value in COMMON_X_TICKS])
-        ax.set_xlim(-X_AXIS_PADDING, 1.0 + X_AXIS_PADDING)
-        ax.set_xlabel("Fraction of datapoints touched")
-        ax.set_ylabel(f"{humanize(metric_name.split('/', 1)[1])} offset vs {reference_name}")
-        ax.set_title(f"{humanize(metric_name).replace('/', ': ')} vs {reference_name}")
+        ax.axhline(0.0, color="#333333", linewidth=1.0, linestyle=":")
+        ax.set_title(BIAS_DISPLAY_NAMES[bias_type])
+        ax.set_ylabel("sycophancy score - SFT score")
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(protocol_names, rotation=X_TICK_ROTATION, ha="right")
 
-    fig.legend(
-        handles=legend_handles(models, reference_model_name),
-        loc="upper center",
-        ncol=4,
-    )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.9))
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def print_summary(
-    models: list[dict],
-    warnings: list[str],
-    output_path: Path,
-    reference_model_name: str,
-) -> None:
-    reference_run = reference_model(models, reference_model_name)
-    print(f"Loaded {len(models)} models for task {TASK_NAME}")
-    print(
-        f"Reference model: {reference_run['model_name']} "
-        f"({reference_display_name(reference_run)})"
-    )
+def format_ci(stats: MetricStats) -> str:
+    return f"{stats.mean:+.4f} [{stats.ci_low:+.4f}, {stats.ci_high:+.4f}]"
 
-    if warnings:
-        print("Warnings:")
-        for warning in warnings:
-            print(f"  - {warning}")
 
-    print("Models:")
-    for model in models:
-        print(
-            "  - "
-            f"{model['model_name']}: "
-            f"{model['series_label']} at {model['touched_fraction']:.6f} "
-            f"from {model['eval_path']}"
+def main() -> None:
+    sft_run = load_eval_run(SFT_MODEL_DIR)
+    sample_keys_by_bias = {
+        bias_type: sorted(key for key in sft_run.samples if key[0] == bias_type)
+        for bias_type in BIAS_TYPES
+    }
+    sft_scores = {
+        bias_type: np.asarray(
+            [sft_run.samples[key] for key in sample_keys_by_bias[bias_type]],
+            dtype=float,
         )
+        for bias_type in BIAS_TYPES
+    }
 
-    print(f"Saved plot to {output_path}")
+    runs_by_protocol = load_protocol_runs()
+    protocol_names = list(runs_by_protocol)
+    score_matrices = {
+        bias_type: {
+            name: protocol_score_matrix(runs, sample_keys_by_bias[bias_type])
+            for name, runs in runs_by_protocol.items()
+        }
+        for bias_type in BIAS_TYPES
+    }
+    protocol_scores = {
+        bias_type: {
+            name: scores.mean(axis=0)
+            for name, scores in score_matrices[bias_type].items()
+        }
+        for bias_type in BIAS_TYPES
+    }
+    run_delta_means = {
+        bias_type: {
+            name: (scores - sft_scores[bias_type]).mean(axis=1).tolist()
+            for name, scores in score_matrices[bias_type].items()
+        }
+        for bias_type in BIAS_TYPES
+    }
+    delta_stats = {
+        bias_type: {
+            name: bootstrap_mean_ci(scores - sft_scores[bias_type])
+            for name, scores in protocol_scores[bias_type].items()
+        }
+        for bias_type in BIAS_TYPES
+    }
 
-
-def main(
-    results_dirs: list[Path] | None = None,
-    output_path: Path | None = None,
-    reference_model_name: str | None = None,
-) -> None:
-    selected_results_dirs = RESULTS_DIRS if results_dirs is None else results_dirs
-    if not selected_results_dirs:
-        raise ValueError("Set RESULTS_DIRS near the top of this file before running it.")
-
-    selected_reference_model_name = (
-        REFERENCE_MODEL_NAME if reference_model_name is None else reference_model_name
+    plot_results(
+        protocol_names=protocol_names,
+        delta_stats=delta_stats,
+        run_delta_means=run_delta_means,
+        output_path=OUTPUT_PATH,
     )
-    results_dirs = [Path(path) for path in selected_results_dirs]
-    output_path = Path(OUTPUT_PATH if output_path is None else output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    eval_paths_by_model, warnings = find_feedback_v2_eval_paths(results_dirs)
-    if not eval_paths_by_model:
-        raise ValueError(f"No {TASK_NAME} eval files found in the provided results directories")
 
-    models = load_models(
-        eval_paths_by_model=eval_paths_by_model,
-        filtered_dir=FILTERED_DIR,
+    print(f"SFT eval: {sft_run.eval_path}")
+    for bias_type in BIAS_TYPES:
+        print(
+            f"SFT {BIAS_DISPLAY_NAMES[bias_type]} score: "
+            f"{sft_scores[bias_type].mean():.4f}"
+        )
+    print(
+        "Loaded "
+        + ", ".join(
+            f"{len(sample_keys_by_bias[bias_type])} {bias_type}"
+            for bias_type in BIAS_TYPES
+        )
+        + " paired eval samples."
     )
-    if not models:
-        raise ValueError("No models could be loaded from the provided results")
-
-    add_reference_offsets(
-        models=models,
-        reference_model_name=selected_reference_model_name,
-        confidence_level=CONFIDENCE_LEVEL,
-        bootstrap_samples=BOOTSTRAP_SAMPLES,
-        bootstrap_seed=BOOTSTRAP_SEED,
-    )
-    plot_metrics(models, output_path, reference_model_name=selected_reference_model_name)
-    print_summary(
-        models=models,
-        warnings=warnings,
-        output_path=output_path,
-        reference_model_name=selected_reference_model_name,
-    )
+    print()
+    print("Protocol results")
+    print("  delta_vs_sft is a paired bootstrap mean with a 95% CI.")
+    print("  Higher scores mean more sycophancy.")
+    for name in protocol_names:
+        runs = runs_by_protocol[name]
+        print(f"  - {name} (n={len(runs)})")
+        for bias_type in BIAS_TYPES:
+            score_mean = float(protocol_scores[bias_type][name].mean())
+            print(
+                f"      {BIAS_DISPLAY_NAMES[bias_type]}: "
+                f"score={score_mean:.4f}, "
+                f"delta_vs_sft={format_ci(delta_stats[bias_type][name])}"
+            )
+        for run_index, run in enumerate(runs):
+            run_deltas = ", ".join(
+                f"{bias_type}={run_delta_means[bias_type][name][run_index]:+.4f}"
+                for bias_type in BIAS_TYPES
+            )
+            print(f"      {run.model_name}: {run_deltas}")
+            print(f"        {run.eval_path}")
+    print()
+    print(f"Saved plot to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

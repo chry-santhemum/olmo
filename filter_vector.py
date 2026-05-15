@@ -83,10 +83,14 @@ def resample_items(items, target_size: int | None, random_seed: int):
         return []
     if len(items) == 0:
         raise ValueError("Cannot resample an empty dataset to a positive target size")
-    if len(items) >= target_size:
-        return list(items[:target_size])
 
     rng = np.random.RandomState(random_seed)
+    if len(items) > target_size:
+        sampled = rng.permutation(len(items))[:target_size]
+        return [items[i] for i in sampled]
+    if len(items) == target_size:
+        return list(items)
+
     output = list(items)
     extra_needed = target_size - len(items)
 
@@ -155,9 +159,13 @@ def build_training_rows_from_selection(
     target_dataset_size: int | None = None,
     random_seed: int = 42,
     extra_rows: list[dict] | None = None,
+    always_discard_indices: set[int] | None = None,
 ) -> list[dict]:
+    always_discard_indices = set() if always_discard_indices is None else always_discard_indices
     base_rows = []
     for i, row in enumerate(source_rows):
+        if i in always_discard_indices:
+            continue
         out = normalize_training_row(row, i)
         if action == "discard" and i in selected_indices:
             continue
@@ -191,6 +199,8 @@ def filter_vector(
     layer: int,
     top_pct: float | None = None,
     bottom_pct: float | None = None,
+    top_threshold: float | None = None,
+    bottom_threshold: float | None = None,
     action: Literal["discard", "flip"] = "discard",
     method: Literal["dot", "cosine"] = "cosine",
     target_dataset_size: int | None = None,
@@ -199,11 +209,14 @@ def filter_vector(
     extra_dataset_path: Path | None = None,
     extra_dataset_size: int | None = None,
 ) -> Path:
+    assert top_pct is None or top_threshold is None, "Only one of top_pct and top_threshold can be supplied"
+    assert bottom_pct is None or bottom_threshold is None, "Only one of bottom_pct and bottom_threshold can be supplied"
+
     manifest_path = cache_dir / "manifest.json"
     with open(manifest_path) as f:
         manifest = Manifest.model_validate_json(f.read())
     chunk_size = manifest.chunk_size
-    dataset_path = cache_dir.parent / "dataset.jsonl"
+    dataset_path = Path("filtered/33K-baseline/dataset.jsonl")
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset path {dataset_path} does not exist")
 
@@ -242,10 +255,16 @@ def filter_vector(
         cutoff = float(np.percentile(sims_arr, 100 - top_pct))
         selected_indices.update({idx for idx, sim in enumerate(sims) if sim >= cutoff})
         logger.info(f"Selected top {top_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
+    if top_threshold is not None:
+        selected_indices.update({idx for idx, sim in enumerate(sims) if sim >= top_threshold})
+        logger.info(f"Selected top threshold {top_threshold:.4f}: {len(selected_indices)} samples")
     if bottom_pct is not None:
         cutoff = float(np.percentile(sims_arr, bottom_pct))
         selected_indices.update({idx for idx, sim in enumerate(sims) if sim <= cutoff})
         logger.info(f"Selected bottom {bottom_pct}% (cutoff={cutoff:.4f}): {len(selected_indices)} samples")
+    if bottom_threshold is not None:
+        selected_indices.update({idx for idx, sim in enumerate(sims) if sim <= bottom_threshold})
+        logger.info(f"Selected bottom threshold {bottom_threshold:.4f}: {len(selected_indices)} samples")
 
     base_examples = []
     for i, row in enumerate(source_rows):
@@ -279,10 +298,13 @@ def filter_vector(
         "filter_config": {
             "top_pct": top_pct,
             "bottom_pct": bottom_pct,
+            "top_threshold": top_threshold,
+            "bottom_threshold": bottom_threshold,
             "action": action,
             "method": method,
             "layer": layer,
             "target_dataset_size": target_dataset_size,
+            "random_seed": random_seed,
             "extra_dataset_path": None if extra_dataset_path is None else str(extra_dataset_path),
             "extra_dataset_size": extra_dataset_size,
         },

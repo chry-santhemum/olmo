@@ -22,7 +22,7 @@ petri-results/
 petri-repeat-results/
 dpo_analysis/
 dpo_filter_data/
-dpo_checkpoints/
+checkpoints/
 dpo_filter_sweep_logs/
 dpo_emb_cache/
 dpo_svd_analysis/
