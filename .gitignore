@@ -32,3 +32,4 @@ eval_persona_extract/
 dpo_train_profile/
 dpo_logs/
 filtered/
+cached_repr_33K_SFT/
